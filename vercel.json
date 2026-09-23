@@ -3,33 +3,28 @@
   "rewrites": [
     {
       "source": "/manifest.json",
-      "destination": "/api/index"
+      "destination": "/api/index?__path=/manifest.json"
     },
     {
       "source": "/stream/:type/:id.json",
-      "destination": "/api/index"
+      "destination": "/api/index?__path=/stream/:type/:id.json"
+    },
+    {
+      "source": "/health",
+      "destination": "/api/index?__path=/health"
     },
     {
       "source": "/(.*)",
-      "destination": "/api/index"
+      "destination": "/api/index?__path=/$1"
     }
   ],
   "headers": [
     {
       "source": "/(.*)",
       "headers": [
-        {
-          "key": "Access-Control-Allow-Origin",
-          "value": "*"
-        },
-        {
-          "key": "Access-Control-Allow-Headers",
-          "value": "*"
-        },
-        {
-          "key": "Access-Control-Allow-Methods",
-          "value": "GET, OPTIONS"
-        }
+        { "key": "Access-Control-Allow-Origin", "value": "*" },
+        { "key": "Access-Control-Allow-Headers", "value": "*" },
+        { "key": "Access-Control-Allow-Methods", "value": "GET, OPTIONS" }
       ]
     }
   ]
