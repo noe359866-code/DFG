@@ -1,0 +1,36 @@
+{
+  "name": "torrents-espanol-hd-addon",
+  "version": "1.0.0",
+  "description": "Addon de Stremio para catálogo y buscador de torrents en Español (Castellano, Latino, Dual y Subtitulado) consultando Supabase. Listo para Vercel Serverless.",
+  "main": "addon.js",
+  "type": "commonjs",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "vercel dev",
+    "dev:local": "node server.js",
+    "test:manifest": "node -e \"console.log(JSON.stringify(require('./addon').manifest, null, 2))\""
+  },
+  "keywords": [
+    "stremio",
+    "addon",
+    "torrent",
+    "supabase",
+    "vercel",
+    "serverless",
+    "espanol"
+  ],
+  "author": "Comunidad Torrents Español",
+  "license": "MIT",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "express": "^4.19.2",
+    "stremio-addon-sdk": "^1.6.10",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "dotenv": "^16.4.5"
+  }
+}
