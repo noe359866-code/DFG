@@ -2,7 +2,7 @@
   "version": 2,
   "functions": {
     "api/index.js": {
-      "includeFiles": ["addon.js"]
+      "includeFiles": "addon.js"
     }
   },
   "rewrites": [
