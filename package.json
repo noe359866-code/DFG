@@ -1,7 +1,7 @@
 {
-  "name": "torrents-espanol-hd-addon",
-  "version": "1.0.0",
-  "description": "Addon de Stremio para catálogo y buscador de torrents en Español (Castellano, Latino, Dual y Subtitulado) consultando Supabase. Listo para Vercel Serverless.",
+  "name": "nexo-play-addon",
+  "version": "1.2.1",
+  "description": "Películas, series y anime en español e inglés para Stremio.",
   "main": "addon.js",
   "type": "commonjs",
   "engines": {
@@ -11,7 +11,8 @@
     "start": "node server.js",
     "dev": "vercel dev",
     "dev:local": "node server.js",
-    "test:manifest": "node -e \"console.log(JSON.stringify(require('./addon').manifest, null, 2))\""
+    "test:manifest": "node -e \"console.log(JSON.stringify(require('./addon').manifest, null, 2))\"",
+    "test": "node --test"
   },
   "keywords": [
     "stremio",
@@ -26,11 +27,13 @@
   "license": "MIT",
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
+    "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "stremio-addon-sdk": "^1.6.10",
     "ws": "^8.18.0"
   },
-  "devDependencies": {
-    "dotenv": "^16.4.5"
+  "overrides": {
+    "path-to-regexp": "^0.1.13",
+    "tmp": "^0.2.7"
   }
 }
