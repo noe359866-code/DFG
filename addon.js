@@ -1,5 +1,5 @@
 /**
- * Torrents Español HD - Stremio Addon
+ * Nexo Play - Stremio Addon
  * Lógica principal del addon: Manifest + Stream Handler
  * 
  * Diseñado para Vercel Serverless + Supabase (PostgreSQL)
@@ -14,11 +14,9 @@ const { createClient } = require('@supabase/supabase-js');
 // ---------------------------------------------------------------------------
 const manifest = {
   id: 'org.comunidad.torrents.espanol',
-  version: '1.0.0',
-  name: 'Torrents Español HD',
-  description: 'Catálogo y buscador de torrents filtrados estrictamente en Español Castellano, Español Latino, Dual y Subtitulado en Español directamente desde Supabase.',
-  icon: 'https://cdn-icons-png.flaticon.com/512/3172/3172520.png',
-  background: 'https://dl.strem.io/bg.jpg',
+  version: '1.2.1',
+  name: 'Nexo Play',
+  description: 'Películas, series y anime en español e inglés. Encuentra opciones de reproducción con información de idioma y calidad, en un solo lugar.',
   resources: ['stream'],
   types: ['movie', 'series', 'anime'],
   idPrefixes: ['tt'],
@@ -85,24 +83,12 @@ function getSupabaseClient() {
  * anime:  "tt0388629:2:10" (mismo formato)
  */
 function parseStremioId(id) {
-  if (!id || typeof id !== 'string') return { imdbId: null, season: null, episode: null };
-  
-  const parts = id.split(':');
-  const imdbId = parts[0];
-  
-  // Validación básica IMDB
-  if (!/^tt\d{7,8}$/.test(imdbId)) {
-    console.warn(`[Addon] ID no estándar: ${id}`);
-  }
-
-  const season = parts[1] ? parseInt(parts[1], 10) : null;
-  const episode = parts[2] ? parseInt(parts[2], 10) : null;
-
-  return {
-    imdbId,
-    season: Number.isNaN(season) ? null : season,
-    episode: Number.isNaN(episode) ? null : episode
-  };
+  const empty = { imdbId: null, season: null, episode: null };
+  if (typeof id !== 'string') return empty;
+  const match = /^(tt\d{7,10})(?::(\d{1,4}):(\d{1,5}))?$/.exec(id);
+  if (!match) return empty;
+  return { imdbId: match[1], season: match[2] === undefined ? null : Number(match[2]),
+    episode: match[3] === undefined ? null : Number(match[3]) };
 }
 
 function isValidInfoHash(hash) {
@@ -110,77 +96,80 @@ function isValidInfoHash(hash) {
 }
 
 function extractInfoHashFromMagnet(magnetUrl) {
-  if (!magnetUrl || typeof magnetUrl !== 'string') return null;
-  const match = magnetUrl.match(/btih:([a-fA-F0-9]{40})/i);
-  return match ? match[1].toLowerCase() : null;
+  if (typeof magnetUrl !== 'string') return null;
+  try {
+    const url = new URL(magnetUrl);
+    if (url.protocol !== 'magnet:') return null;
+    for (const xt of url.searchParams.getAll('xt')) {
+      const hash = xt.replace(/^urn:btih:/i, '');
+      if (hash === xt) continue;
+      if (isValidInfoHash(hash)) return hash.toLowerCase();
+      if (/^[a-z2-7]{32}$/i.test(hash)) {
+        const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+        let bits = '';
+        for (const char of hash.toUpperCase()) bits += alphabet.indexOf(char).toString(2).padStart(5, '0');
+        return bits.match(/.{8}/g).map(byte => parseInt(byte, 2).toString(16).padStart(2, '0')).join('');
+      }
+    }
+  } catch (_) { /* malformed magnet */ }
+  return null;
 }
 
 function formatSizeGB(row) {
-  // Prioriza size_bytes, luego size (bytes), luego size string, luego size_gb
-  if (row.size_bytes) {
-    return (Number(row.size_bytes) / 1024 / 1024 / 1024).toFixed(2);
+  for (const [value, divisor] of [[row.size_bytes, 1024 ** 3], [row.size_gb, 1], [row.size, 1024 ** 3]]) {
+    if (value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)) && Number(value) >= 0) return (Number(value) / divisor).toFixed(2);
   }
-  if (row.size && !isNaN(Number(row.size)) && Number(row.size) > 1024) {
-    // Asumimos bytes si es número grande
-    return (Number(row.size) / 1024 / 1024 / 1024).toFixed(2);
-  }
-  if (row.size_gb) return Number(row.size_gb).toFixed(2);
-  if (typeof row.size === 'string' && row.size.toLowerCase().includes('gb')) {
-    return row.size.replace(/[^0-9.]/g, '') || '—';
-  }
-  if (typeof row.size === 'string' && row.size.toLowerCase().includes('mb')) {
-    const mb = parseFloat(row.size);
-    return (mb / 1024).toFixed(2);
-  }
-  return '—';
+  const match = typeof row.size === 'string' && /^(\d+(?:[.,]\d+)?)\s*(gib|gb|mib|mb|kib|kb)$/i.exec(row.size.trim());
+  if (!match) return '—';
+  return (Number(match[1].replace(',', '.')) / (/^g/i.test(match[2]) ? 1 : /^m/i.test(match[2]) ? 1024 : 1024 ** 2)).toFixed(2);
 }
 
 function getLanguageTag(row) {
-  // Normaliza audio/lenguaje a etiquetas cortas para el `name`
-  const audio = `${row.audio || ''} ${row.language || ''} ${row.lang || ''}`.toLowerCase();
-  const title = `${row.title || row.release_name || ''}`.toLowerCase();
-  const combined = audio + ' ' + title;
-
-  // DUAL debe evaluarse primero (contiene 'cast' y 'lat')
-  if (combined.includes('dual') || (combined.includes('cast') && combined.includes('lat'))) return 'DUAL';
-  if (combined.includes('castellano') || combined.includes('cast ')) return 'CAST';
-  if (combined.includes('latino') || combined.includes('lat ')) return 'LAT';
-  if (combined.includes('subtitulado') || combined.includes('subs') || combined.includes('vose') || combined.includes('vos ')) return 'VOSE';
-  if (combined.includes('esp') || combined.includes('español') || combined.includes('spanish')) return 'ESP';
-  return 'ESP';
+  const metadata = [row.audio, row.language, row.lang].filter(Boolean).join(' ');
+  const text = (metadata || row.release_name || row.title || row.name || '').toLowerCase();
+  const has = pattern => pattern.test(text);
+  const spanish = has(/\b(es|esp|español|spanish|castellano|cast|latino|lat)\b/);
+  const english = has(/\b(en|eng|english|inglés|ingles)\b/);
+  if (has(/\b(dual|multi)\b/) || (spanish && english)) return 'DUAL';
+  if (has(/\b(vose|vos|subtitulado)\b/)) return 'VOSE';
+  if (has(/\b(castellano|cast)\b/)) return 'CAST';
+  if (has(/\b(latino|lat)\b/)) return 'LAT';
+  if (spanish) return 'ESP';
+  if (english) return 'ENG';
+  return 'N/D';
 }
 
 function getResolutionTag(row) {
-  const str = `${row.resolution || row.quality || row.release_name || row.title || row.name || ''}`.toLowerCase();
+  const str = [row.resolution, row.quality, row.release_name, row.title, row.name].filter(Boolean).join(' ').toLowerCase();
   if (str.includes('2160') || str.includes('4k') || str.includes('uhd')) return '4K';
   if (str.includes('1080')) return '1080p';
   if (str.includes('720')) return '720p';
   if (str.includes('480')) return '480p';
-  return row.quality || row.resolution || 'HD';
+  return row.quality || row.resolution || 'N/D';
 }
 
 // ---------------------------------------------------------------------------
 // 4. STREAM HANDLER - Lógica principal
 // ---------------------------------------------------------------------------
-builder.defineStreamHandler(async ({ type, id }) => {
+async function streamHandler({ type, id }, clientFactory = getSupabaseClient) {
   const start = Date.now();
   console.log(`[Stream] → type=${type} id=${id}`);
 
   try {
     // Validación inicial
-    if (!id || !type) {
+    if (!id || !manifest.types.includes(type)) {
       console.warn('[Stream] Parámetros faltantes');
       return { streams: [] };
     }
 
     const { imdbId, season, episode } = parseStremioId(id);
 
-    if (!imdbId || !imdbId.startsWith('tt')) {
+    if (!imdbId || (type === 'movie' ? season !== null : season === null || episode === null || episode < 1)) {
       console.warn(`[Stream] imdbId inválido: ${imdbId}`);
       return { streams: [] };
     }
 
-    const supabase = getSupabaseClient();
+    const supabase = clientFactory();
     if (!supabase) {
       console.error('[Stream] Supabase no configurado - revisa SUPABASE_URL / KEY');
       return { streams: [] };
@@ -190,7 +179,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
       .from('torrents')
       .select('*')
       .eq('imdb_id', imdbId)
-      .order('seeders', { ascending: false })
+      .order('seeders', { ascending: false, nullsFirst: false })
       .limit(25);
 
     // Para series/anime: filtrar por temporada y episodio si vienen en el ID
@@ -206,7 +195,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
     }
     // Para movie no filtramos season/episode aunque existan nulos en DB
 
-    const { data, error } = await query;
+    const { data, error } = await query.abortSignal(AbortSignal.timeout(8000));
 
     if (error) {
       console.error('[Supabase] Error query:', error.message, error.details || '');
@@ -235,29 +224,23 @@ builder.defineStreamHandler(async ({ type, id }) => {
         }
 
         if (!isValidInfoHash(infoHash)) {
-          // Si no hay infoHash válido pero hay magnetUrl, usar `url` en vez de infoHash
-          // Stremio soporta ambos. Preferimos infoHash pero damos fallback.
-          const magnetUrl = row.magnet_url || row.magnetUrl || row.magnet || null;
-          if (magnetUrl && magnetUrl.startsWith('magnet:')) {
-            // Retornar stream con url (no infoHash)
-            return buildStreamWithUrl(row, magnetUrl);
-          }
-          console.warn(`[Stream] Fila sin infoHash válido descartada: ${row.title || row.release_name}`);
           return null;
         }
 
         return buildStream(row, infoHash);
       })
-      .filter(Boolean);
+      .filter(Boolean)
+      .filter((stream, index, all) => all.findIndex(item => item.infoHash === stream.infoHash && item.fileIdx === stream.fileIdx) === index);
 
     console.log(`[Stream] → Enviando ${streams.length} streams válidos`);
-    return { streams };
+    return { streams, cacheMaxAge: 120 };
 
   } catch (err) {
     console.error('[Stream] Excepción no controlada:', err.message, err.stack?.slice(0, 500));
     return { streams: [] };
   }
-});
+}
+builder.defineStreamHandler(streamHandler);
 
 // ---------------------------------------------------------------------------
 // Formateadores de Stream
@@ -267,15 +250,15 @@ function buildStream(row, infoHash) {
   const resolution = getResolutionTag(row);
   const sizeGB = formatSizeGB(row);
   const seeders = row.seeders ?? row.seed ?? 0;
-  const audio = row.audio || row.language || 'Español';
-  const subs = row.subtitles || row.subs || 'Español';
-  const titleDisplay = row.title || row.release_name || row.name || 'Torrent Español';
+  const audio = row.audio || row.language || row.lang || 'No indicado';
+  const subs = row.subtitles || row.subs || 'No indicados';
+  const titleDisplay = row.title || row.release_name || row.name || 'Sin título';
   const codec = row.codec || row.video_codec || '—';
   const group = row.release_group || row.group || row.team || '—';
   const quality = row.quality || resolution;
 
   // name: cabecera corta visible en lista (máx ~30 chars)
-  const name = `Torrents Español HD\n[${langTag}] ${resolution}`;
+  const name = `Nexo Play\n[${langTag}] ${resolution}`;
 
   // title: multilínea con detalles (Stremio lo muestra al hacer hover)
   const titleLines = [
@@ -296,34 +279,13 @@ function buildStream(row, infoHash) {
     name,
     title: titleLines.join('\n'),
     infoHash: infoHash.toLowerCase(),
+    ...(Number.isSafeInteger(row.file_idx ?? row.fileIdx) && (row.file_idx ?? row.fileIdx) >= 0 ? { fileIdx: row.file_idx ?? row.fileIdx } : {}),
     behaviorHints: {
-      bingeGroup: `torrents-es-${resolution.toLowerCase()}-${langTag.toLowerCase()}`,
+      bingeGroup: `nexo-play-${resolution.toLowerCase()}-${langTag.toLowerCase()}`,
       // Si tu tabla tiene edad/prioridad, úsala aquí
     },
     // Fuentes opcionales - Stremio las usa para complementar el magnet
     ...(sources ? { sources } : {})
-  };
-}
-
-function buildStreamWithUrl(row, magnetUrl) {
-  const langTag = getLanguageTag(row);
-  const resolution = getResolutionTag(row);
-  const sizeGB = formatSizeGB(row);
-  const seeders = row.seeders ?? 0;
-
-  return {
-    name: `Torrents Español HD\n[${langTag}] ${resolution} (Magnet)`,
-    title: [
-      `🎬 ${row.title || row.release_name || 'Torrent Español'}`,
-      `🔊 Audio: ${row.audio || 'Español'} | 📝 Subs: ${row.subtitles || 'Español'}`,
-      `💾 Tamaño: ${sizeGB} GB`,
-      `👥 Seeders: ${seeders}`,
-      `🔗 Magnet Link`
-    ].join('\n'),
-    url: magnetUrl,
-    behaviorHints: {
-      bingeGroup: `torrents-es-magnet-${langTag.toLowerCase()}`
-    }
   };
 }
 
@@ -332,3 +294,5 @@ function buildStreamWithUrl(row, magnetUrl) {
 // ---------------------------------------------------------------------------
 const addonInterface = builder.getInterface();
 module.exports = addonInterface;
+
+module.exports.helpers = { parseStremioId, getLanguageTag, formatSizeGB, extractInfoHashFromMagnet, streamHandler };
