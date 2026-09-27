@@ -1,4 +1,4 @@
-# Nexo Play · 1.2.1
+# Nexo Play · 1.2.2
 
 ![Nexo Play](public/brand.png)
 
