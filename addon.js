@@ -14,7 +14,7 @@ const { createClient } = require('@supabase/supabase-js');
 // ---------------------------------------------------------------------------
 const manifest = {
   id: 'org.comunidad.torrents.espanol',
-  version: '1.2.1',
+  version: '1.2.2',
   name: 'Nexo Play',
   description: 'Películas, series y anime en español e inglés. Encuentra opciones de reproducción con información de idioma y calidad, en un solo lugar.',
   resources: ['stream'],
@@ -24,6 +24,12 @@ const manifest = {
   behaviorHints: {
     configurable: false,
     configurationRequired: false
+  },
+  // Verificación pública emitida por stremio-addons.net. Se sirve en el
+  // manifiesto para todo el mundo; no es un secreto ni depende de .env.
+  stremioAddonsConfig: {
+    issuer: 'https://stremio-addons.net',
+    signature: 'eyJhbGciOiJkaXIiLCJlbmMiOiJBMTI4Q0JDLUhTMjU2In0..g42ZuVG1dWzDRcFDdl2fSg.XTSmojbOIelhstXtRYc4quyFOTqqzzpM5A37XgsUCQFnXn0-CvOqL4-_cB0Ici9r4PKbof275NCBIoyHkfXYEcjZGKHnoEekJ06szsimbfujDbMlELhpntPJ-KR5uH0n.nl6gG0luYfRKGH23oOt-YQ'
   }
 };
 

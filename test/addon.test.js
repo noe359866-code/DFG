@@ -8,6 +8,10 @@ test('consistent release and private public description', () => {
   assert.equal(addon.manifest.name, 'Nexo Play');
   assert.doesNotMatch(addon.manifest.description, /supabase|public\.torrents|service_role/i);
 });
+test('public stremio-addons.net verification in manifest', () => {
+  assert.equal(addon.manifest.stremioAddonsConfig.issuer, 'https://stremio-addons.net');
+  assert.match(addon.manifest.stremioAddonsConfig.signature, /^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9._-]*$/);
+});
 test('strict ids and specials', () => {
   for (const id of ['ttbad', 'tt1234567:1x:2', 'tt1234567:1', 'tt1234567:1:2:3', null]) assert.equal(parseStremioId(id).imdbId, null);
   assert.deepEqual(parseStremioId('tt1234567:0:2'), { imdbId: 'tt1234567', season: 0, episode: 2 });

@@ -1,5 +1,10 @@
 # Historial de cambios
 
+## 1.2.2 — 2026-09-27
+
+### Verificación
+- El manifiesto público incluye `stremioAddonsConfig` con el emisor y la firma emitidos por stremio-addons.net. La configuración viaja en `/manifest.json` para todo el mundo, sin depender de archivos ni variables locales.
+
 ## 1.2.1 — 2026-09-27
 
 ### Identidad
