@@ -12,7 +12,7 @@ app.use((req, res, next) => {
   if (!['GET', 'HEAD'].includes(req.method)) return res.status(405).set('Allow', 'GET, HEAD, OPTIONS').json({ error: 'Método no permitido' });
   next();
 });
-app.use('/assets', express.static(path.join(__dirname, 'public'), { maxAge: '1d', index: false }));
+app.use('/assets', express.static(path.join(__dirname, 'public', 'assets'), { maxAge: '1d', index: false }));
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 app.get('/health', (req, res) => res.set('Cache-Control', 'no-store').json({ status: 'ok', version: addon.manifest.version }));
 app.get('/manifest.json', (req, res) => {
@@ -20,7 +20,10 @@ app.get('/manifest.json', (req, res) => {
   const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
   const proto = String(req.headers['x-forwarded-proto'] || req.protocol).split(',')[0].trim();
   const valid = /^[a-z0-9.-]+(?::\d{1,5})?$/i.test(host) && ['http', 'https'].includes(proto);
-  res.set('Cache-Control', 'no-cache').json({ ...addon.manifest,
+  // El manifiesto se cachea brevemente en el edge: absorbe las oleadas de
+  // instalación sin invocar la función. El logo depende del host, pero el
+  // despliegue productivo tiene un único dominio canónico.
+  res.set('Cache-Control', 'public, s-maxage=300, stale-while-revalidate=3600').json({ ...addon.manifest,
     ...(valid ? { logo: `${proto}://${host}/assets/brand.png`, icon: `${proto}://${host}/assets/brand.png` } : {}) });
 });
 app.use(getRouter(addon));

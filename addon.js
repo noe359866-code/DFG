@@ -14,7 +14,7 @@ const { createClient } = require('@supabase/supabase-js');
 // ---------------------------------------------------------------------------
 const manifest = {
   id: 'org.comunidad.torrents.espanol',
-  version: '1.2.2',
+  version: '1.2.3',
   name: 'Nexo Play',
   description: 'Películas, series y anime en español e inglés. Encuentra opciones de reproducción con información de idioma y calidad, en un solo lugar.',
   resources: ['stream'],

@@ -1,5 +1,12 @@
 # Historial de cambios
 
+## 1.2.3 — 2026-09-27
+
+### Rendimiento
+- La página de instalación y los archivos de `assets/` se sirven como archivos estáticos: el CDN de Vercel los entrega sin invocar la función serverless. La portada deja de consumir invocaciones con cada visita.
+- `/assets/` anuncia un día de `Cache-Control` también en el edge (antes el día de caché solo aplicaba al navegador del visitante).
+- `/manifest.json` se cachea cinco minutos en el edge con `stale-while-revalidate` de una hora: las oleadas de instalación tras una publicación en el catálogo no se traducen en una invocación por cada descarga.
+
 ## 1.2.2 — 2026-09-27
 
 ### Verificación

@@ -9,8 +9,10 @@ for (const [name, handler] of [['local', require('../app')], ['vercel', require(
     const base = `http://127.0.0.1:${server.address().port}`;
     const route = path => name === 'vercel' ? `/api/index?__path=${encodeURIComponent(path)}` : path;
     const get = (path, options) => fetch(base + route(path), options);
+    const manifestResponse = await get('/manifest.json');
+    assert.equal(manifestResponse.headers.get('cache-control'), 'public, s-maxage=300, stale-while-revalidate=3600');
     const manifest = await (await get('/manifest.json')).json();
-    assert.equal(manifest.version, '1.2.2');
+    assert.equal(manifest.version, '1.2.3');
     assert.deepEqual(manifest.stremioAddonsConfig, {
       issuer: 'https://stremio-addons.net',
       signature: 'eyJhbGciOiJkaXIiLCJlbmMiOiJBMTI4Q0JDLUhTMjU2In0..g42ZuVG1dWzDRcFDdl2fSg.XTSmojbOIelhstXtRYc4quyFOTqqzzpM5A37XgsUCQFnXn0-CvOqL4-_cB0Ici9r4PKbof275NCBIoyHkfXYEcjZGKHnoEekJ06szsimbfujDbMlELhpntPJ-KR5uH0n.nl6gG0luYfRKGH23oOt-YQ'

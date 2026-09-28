@@ -52,7 +52,7 @@ Los magnets admiten BTIH hexadecimal o base32; las filas sin hash válido se des
 - `app.js`: rutas HTTP compartidas, CORS, imagen y manifiesto público.
 - `server.js`: arranque local.
 - `api/index.js`: adaptación de reescrituras de Vercel.
-- `public/`: página de instalación e imagen de marca generada con IA.
+- `public/`: página de instalación e imagen de marca generada con IA. `index.html` y `assets/` son archivos estáticos: Vercel los sirve desde su CDN sin invocar la función, y `/assets/` anuncia un día de caché.
 - `test/`: pruebas unitarias y HTTP con datos simulados.
 
 La imagen se sirve desde el propio despliegue; no depende de un proveedor externo. El manifiesto HTTP incluye su URL absoluta. Las versiones fijadas mediante `overrides` corrigen dependencias transitivas del SDK sin degradarlo a una versión incompatible.
