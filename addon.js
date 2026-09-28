@@ -14,7 +14,7 @@ const { createClient } = require('@supabase/supabase-js');
 // ---------------------------------------------------------------------------
 const manifest = {
   id: 'org.comunidad.torrents.espanol',
-  version: '1.2.3',
+  version: '1.2.4',
   name: 'Nexo Play',
   description: 'Películas, series y anime en español e inglés. Encuentra opciones de reproducción con información de idioma y calidad, en un solo lugar.',
   resources: ['stream'],
@@ -133,6 +133,61 @@ function extractTrackersFromMagnet(magnetUrl) {
   } catch (_) { /* magnet malformado */ return []; }
 }
 
+function extractTitleFromMagnet(magnetUrl) {
+  if (typeof magnetUrl !== 'string') return null;
+  try {
+    const url = new URL(magnetUrl);
+    if (url.protocol !== 'magnet:') return null;
+    const dn = url.searchParams.get('dn');
+    return dn && dn.trim() ? dn.trim() : null;
+  } catch (_) { /* magnet malformado */ return null; }
+}
+
+function sanitizeOneLine(str) {
+  if (typeof str !== 'string') return '';
+  return str.replace(/[\r\n\t\f\v]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function parseSizeBytes(row) {
+  for (const [val, mult] of [[row.size_bytes, 1], [row.size_gb, 1024 ** 3]]) {
+    if (val !== null && val !== undefined && val !== '' && Number.isFinite(Number(val)) && Number(val) > 0) {
+      return Math.round(Number(val) * mult);
+    }
+  }
+  if (row.size !== null && row.size !== undefined && row.size !== '') {
+    if (Number.isFinite(Number(row.size)) && Number(row.size) > 0) return Math.round(Number(row.size));
+    const match = typeof row.size === 'string' && /^(\d+(?:[.,]\d+)?)\s*(gib|gb|mib|mb|kib|kb)$/i.exec(row.size.trim());
+    if (match) {
+      const num = Number(match[1].replace(',', '.'));
+      const unit = match[2].toLowerCase();
+      const mult = unit.startsWith('g') ? 1024 ** 3 : unit.startsWith('m') ? 1024 ** 2 : 1024;
+      return Math.round(num * mult);
+    }
+  }
+  return null;
+}
+
+const DEFAULT_TRACKERS = [
+  'udp://tracker.opentrackr.org:1337/announce',
+  'udp://open.demonii.com:1337/announce',
+  'udp://open.stealth.si:80/announce',
+  'udp://tracker.torrent.eu.org:451/announce',
+  'udp://explodie.org:6969/announce',
+  'udp://tracker.openbittorrent.com:6969/announce'
+];
+
+function buildTrackers(dbTrackersRaw, magnetTrackers = []) {
+  const dbTrackers = Array.isArray(dbTrackersRaw) ? dbTrackersRaw
+    : (typeof dbTrackersRaw === 'string' && dbTrackersRaw.trim() ? [dbTrackersRaw] : []);
+  const custom = [...magnetTrackers, ...dbTrackers]
+    .map(tr => typeof tr === 'string' ? tr.trim() : '')
+    .filter(tr => /^(udp|https?):\/\//i.test(tr));
+  const candidateList = custom.length ? custom : DEFAULT_TRACKERS;
+  return [...new Set(candidateList)]
+    .slice(0, 10)
+    .map(tr => tr.startsWith('tracker:') ? tr : `tracker:${tr}`);
+}
+
 function formatSizeGB(row) {
   for (const [value, divisor] of [[row.size_bytes, 1024 ** 3], [row.size_gb, 1], [row.size, 1024 ** 3]]) {
     if (value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)) && Number(value) >= 0) return (Number(value) / divisor).toFixed(2);
@@ -229,8 +284,8 @@ async function streamHandler({ type, id }, clientFactory = getSupabaseClient) {
 
     console.log(`[Stream] ${data.length} resultados para ${imdbId} en ${Date.now() - start}ms`);
 
-    // Mapeo a formato Stremio
-    const streams = data
+    // Mapeo a formato Stremio y ordenación optimizada por calidad, idioma y semillas
+    const streamEntries = data
       .map((row) => {
         // --- InfoHash con fallback a magnetUrl ---
         let infoHash = row.info_hash || row.infoHash || row.hash || null;
@@ -247,9 +302,18 @@ async function streamHandler({ type, id }, clientFactory = getSupabaseClient) {
           return null;
         }
 
-        return buildStream(row, infoHash, extractTrackersFromMagnet(magnet), imdbId);
+        const magnetTrackers = extractTrackersFromMagnet(magnet);
+        const magnetTitle = extractTitleFromMagnet(magnet);
+        return buildStreamEntry(row, infoHash, magnetTrackers, imdbId, magnetTitle);
       })
-      .filter(Boolean)
+      .filter(Boolean);
+
+    // Ordenar de forma determinista para ofrecer la mejor experiencia:
+    // Mayor resolución -> Mejor compatibilidad de idioma -> Más seeders -> Mayor tamaño
+    streamEntries.sort(compareStreamEntries);
+
+    const streams = streamEntries
+      .map(entry => entry.stream)
       .filter((stream, index, all) => all.findIndex(item => item.infoHash === stream.infoHash && item.fileIdx === stream.fileIdx) === index);
 
     console.log(`[Stream] → Enviando ${streams.length} streams válidos`);
@@ -263,19 +327,52 @@ async function streamHandler({ type, id }, clientFactory = getSupabaseClient) {
 builder.defineStreamHandler(streamHandler);
 
 // ---------------------------------------------------------------------------
-// Formateadores de Stream
+// Formateadores y comparadores de Stream
 // ---------------------------------------------------------------------------
-function buildStream(row, infoHash, magnetTrackers = [], imdbId = '') {
+const RESOLUTION_WEIGHT = {
+  '4K': 4000,
+  '1080p': 3000,
+  '720p': 2000,
+  '480p': 1000,
+  'N/D': 0
+};
+
+const LANGUAGE_WEIGHT = {
+  'DUAL': 500,
+  'CAST': 400,
+  'LAT': 350,
+  'ESP': 300,
+  'VOSE': 200,
+  'ENG': 100,
+  'N/D': 0
+};
+
+function compareStreamEntries(a, b) {
+  const resDiff = (RESOLUTION_WEIGHT[b.resolution] ?? 0) - (RESOLUTION_WEIGHT[a.resolution] ?? 0);
+  if (resDiff !== 0) return resDiff;
+
+  const langDiff = (LANGUAGE_WEIGHT[b.langTag] ?? 0) - (LANGUAGE_WEIGHT[a.langTag] ?? 0);
+  if (langDiff !== 0) return langDiff;
+
+  const seederDiff = (b.seeders ?? 0) - (a.seeders ?? 0);
+  if (seederDiff !== 0) return seederDiff;
+
+  return (b.sizeBytes ?? 0) - (a.sizeBytes ?? 0);
+}
+
+function buildStreamEntry(row, infoHash, magnetTrackers = [], imdbId = '', magnetTitle = null) {
   const langTag = getLanguageTag(row);
   const resolution = getResolutionTag(row);
   const sizeGB = formatSizeGB(row);
+  const sizeBytes = parseSizeBytes(row);
   const seeders = row.seeders ?? row.seed ?? 0;
-  const audio = row.audio || row.language || row.lang || 'No indicado';
-  const subs = row.subtitles || row.subs || 'No indicados';
-  const titleDisplay = row.title || row.release_name || row.name || 'Sin título';
-  const codec = row.codec || row.video_codec || '—';
-  const group = row.release_group || row.group || row.team || '—';
-  const quality = row.quality || resolution;
+  const audio = sanitizeOneLine(row.audio || row.language || row.lang) || 'No indicado';
+  const subs = sanitizeOneLine(row.subtitles || row.subs) || 'No indicados';
+  const rawTitle = row.title || row.release_name || row.name || magnetTitle || 'Sin título';
+  const titleDisplay = sanitizeOneLine(rawTitle) || 'Sin título';
+  const codec = sanitizeOneLine(row.codec || row.video_codec) || '—';
+  const group = sanitizeOneLine(row.release_group || row.group || row.team) || '—';
+  const quality = sanitizeOneLine(row.quality) || resolution;
 
   // name: cabecera corta visible en lista (máx ~30 chars)
   const name = `Nexo Play\n[${langTag}] ${resolution}`;
@@ -291,28 +388,39 @@ function buildStream(row, infoHash, magnetTrackers = [], imdbId = '') {
   ];
 
   // Trackers del torrent: los del magnet original más los de la columna
-  // trackers, normalizados como fuentes "tracker:" de Stremio, sin duplicados
-  // y con un máximo de diez. Stremio los usa para encontrar pares más rápido.
-  const dbTrackers = Array.isArray(row.trackers) ? row.trackers
-    : (typeof row.trackers === 'string' && row.trackers.trim() ? [row.trackers] : []);
-  const trackers = [...new Set([...magnetTrackers, ...dbTrackers
-    .map(tr => typeof tr === 'string' ? tr.trim() : '')
-    .filter(tr => /^(udp|https?):\/\//i.test(tr))])]
-    .slice(0, 10)
-    .map(tr => tr.startsWith('tracker:') ? tr : `tracker:${tr}`);
+  // trackers, con fallback a trackers públicos de alta disponibilidad.
+  const trackers = buildTrackers(row.trackers, magnetTrackers);
 
-  return {
+  const fileIdx = Number.isSafeInteger(row.file_idx ?? row.fileIdx) && (row.file_idx ?? row.fileIdx) >= 0
+    ? (row.file_idx ?? row.fileIdx)
+    : undefined;
+
+  const stream = {
     name,
     title: titleLines.join('\n'),
     infoHash: infoHash.toLowerCase(),
-    ...(Number.isSafeInteger(row.file_idx ?? row.fileIdx) && (row.file_idx ?? row.fileIdx) >= 0 ? { fileIdx: row.file_idx ?? row.fileIdx } : {}),
+    ...(fileIdx !== undefined ? { fileIdx } : {}),
     behaviorHints: {
       // Identifica título + calidad + idioma: la reproducción continua solo
       // agrupa episodios de la misma serie, nunca títulos distintos.
-      bingeGroup: `nexo-play|${imdbId}|${resolution.toLowerCase()}-${langTag.toLowerCase()}`
+      bingeGroup: `nexo-play|${imdbId}|${resolution.toLowerCase()}-${langTag.toLowerCase()}`,
+      ...(sizeBytes ? { videoSize: sizeBytes } : {}),
+      ...(rawTitle ? { filename: titleDisplay } : {})
     },
     ...(trackers.length ? { sources: trackers } : {})
   };
+
+  return {
+    stream,
+    resolution,
+    langTag,
+    seeders: Number.isFinite(Number(seeders)) ? Number(seeders) : 0,
+    sizeBytes: sizeBytes || 0
+  };
+}
+
+function buildStream(row, infoHash, magnetTrackers = [], imdbId = '') {
+  return buildStreamEntry(row, infoHash, magnetTrackers, imdbId).stream;
 }
 
 // ---------------------------------------------------------------------------
