@@ -31,5 +31,25 @@ for (const [name, handler] of [['local', require('../app')], ['vercel', require(
     const streams = await get('/stream/movie/tt1234567.json');
     assert.equal(streams.status, 200);
     assert.deepEqual((await streams.json()).streams, []);
+    assert.ok(!/(s-maxage|max-age)/.test(streams.headers.get('cache-control') || ''), 'los fallos de base de datos no se cachean');
   });
 }
+test('landing version matches the manifest version', async t => {
+  const server = http.createServer(require('../app'));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const landing = await (await fetch(`http://127.0.0.1:${server.address().port}/`)).text();
+  assert.match(landing, new RegExp(`id="version">${require('../addon').manifest.version}</b>`), 'la versión de la portada debe coincidir con el manifiesto');
+});
+test('sdk cache headers gain an s-maxage twin for the edge', () => {
+  const { edgeCacheControl } = require('../app');
+  const run = value => {
+    const headers = {};
+    const res = { setHeader: (key, headerValue) => { headers[String(key).toLowerCase()] = headerValue; } };
+    edgeCacheControl({}, res, () => {});
+    res.setHeader('Cache-Control', value);
+    return headers['cache-control'];
+  };
+  assert.equal(run('max-age=120, stale-while-revalidate=600, public'), 's-maxage=120, max-age=120, stale-while-revalidate=600, public');
+  assert.equal(run('no-store'), 'no-store');
+});

@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const addon = require('../addon');
-const { parseStremioId, getLanguageTag, formatSizeGB, extractInfoHashFromMagnet, streamHandler } = addon.helpers;
+const { parseStremioId, getLanguageTag, formatSizeGB, extractInfoHashFromMagnet, extractTrackersFromMagnet, streamHandler } = addon.helpers;
 const hash = 'a'.repeat(40);
 test('consistent release and private public description', () => {
   assert.equal(addon.manifest.version, require('../package.json').version);
@@ -31,6 +31,14 @@ test('magnet parsing validates complete hex and base32 hashes', () => {
   assert.equal(extractInfoHashFromMagnet(`https://x/urn:btih:${hash}`), null);
   assert.equal(extractInfoHashFromMagnet(`magnet:?xt=urn:btih:${hash}fff`), null);
 });
+test('magnet trackers must be udp or http(s) urls', () => {
+  assert.deepEqual(
+    extractTrackersFromMagnet(`magnet:?xt=urn:btih:${hash}&tr=udp://tracker.opentrackr.org:1337&tr=javascript:alert(1)&tr=ws://x&tr=https://tracker.example.org/announce`),
+    ['udp://tracker.opentrackr.org:1337', 'https://tracker.example.org/announce']
+  );
+  assert.deepEqual(extractTrackersFromMagnet('magnet:malformed'), []);
+  assert.deepEqual(extractTrackersFromMagnet(null), []);
+});
 function mock(data, error = null) {
   const calls = [];
   const query = {};
@@ -54,4 +62,18 @@ test('reject invalid requests before database access', async () => {
 test('database errors return empty streams', async () => {
   const m = mock(null, { message: 'test error' });
   assert.deepEqual(await streamHandler({ type: 'movie', id: 'tt1234567' }, m.client), { streams: [] });
+});
+test('magnet trackers travel in sources and bingeGroup identifies the title', async () => {
+  const magnet = `magnet:?xt=urn:btih:${hash}&tr=udp://tracker.opentrackr.org:1337&tr=udp://open.demonii.com:1337`;
+  const m = mock([{ magnet, title: 'Ejemplo 1080p', seeders: 3 }]);
+  const result = await streamHandler({ type: 'movie', id: 'tt1234567' }, m.client);
+  assert.equal(result.streams.length, 1);
+  assert.deepEqual(result.streams[0].sources, ['tracker:udp://tracker.opentrackr.org:1337', 'tracker:udp://open.demonii.com:1337']);
+  assert.match(result.streams[0].behaviorHints.bingeGroup, /tt1234567/);
+  assert.equal(result.cacheMaxAge, 120);
+  assert.ok(result.staleRevalidate >= result.cacheMaxAge);
+});
+test('empty results announce a short cache; failures announce none', async () => {
+  assert.deepEqual(await streamHandler({ type: 'movie', id: 'tt1234567' }, mock([]).client), { streams: [], cacheMaxAge: 60 });
+  assert.deepEqual(await streamHandler({ type: 'movie', id: 'tt1234567' }, mock(null, { message: 'fallo' }).client), { streams: [] });
 });

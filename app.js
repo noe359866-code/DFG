@@ -26,10 +26,25 @@ app.get('/manifest.json', (req, res) => {
   res.set('Cache-Control', 'public, s-maxage=300, stale-while-revalidate=3600').json({ ...addon.manifest,
     ...(valid ? { logo: `${proto}://${host}/assets/brand.png`, icon: `${proto}://${host}/assets/brand.png` } : {}) });
 });
-app.use(getRouter(addon));
+// El SDK solo emite max-age; duplicarlo como s-maxage habilita la caché de
+// edge de Vercel también para las respuestas de streams, sin tocar la librería.
+const sdkRouter = getRouter(addon);
+const edgeCacheControl = (req, res, next) => {
+  const setHeader = res.setHeader.bind(res);
+  res.setHeader = (key, value) => {
+    if (String(key).toLowerCase() === 'cache-control' && typeof value === 'string' && !value.includes('s-maxage')) {
+      const match = /(?:^|,)\s*max-age=(\d+)/.exec(value);
+      if (match) value = `s-maxage=${match[1]}, ${value}`;
+    }
+    return setHeader(key, value);
+  };
+  sdkRouter(req, res, next);
+};
+app.use(edgeCacheControl);
 app.use((req, res) => res.status(404).json({ error: 'No encontrado' }));
 app.use((err, req, res, next) => {
   if (res.headersSent) return next(err);
   res.status(500).json({ error: 'Error interno' });
 });
 module.exports = app;
+module.exports.edgeCacheControl = edgeCacheControl;

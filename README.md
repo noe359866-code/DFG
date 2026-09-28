@@ -44,7 +44,7 @@ La aplicación consulta `torrents` por `imdb_id`; para series/anime también exi
 
 Campos utilizados: `info_hash` (alternativas `infoHash`, `hash`) o `magnet_url` (`magnetUrl`, `magnet`), título, idioma/audio, resolución/calidad y tamaño. Opcionalmente `file_idx`/`fileIdx` indica el archivo del torrent. Los campos de metadatos ausentes se muestran como no indicados, sin inventar idioma, subtítulos ni calidad.
 
-Los magnets admiten BTIH hexadecimal o base32; las filas sin hash válido se descartan. Las consultas tienen un límite de tiempo de ocho segundos. Los resultados correctos anuncian 120 segundos de caché HTTP; los fallos no anuncian esa caché. `/health` comprueba que la aplicación responde, no la conectividad con la base de datos.
+Los magnets admiten BTIH hexadecimal o base32; las filas sin hash válido se descartan. Los trackers del magnet original (`tr=`) y los de la columna `trackers` viajan en `sources` de cada stream, normalizados y sin duplicados, para acelerar la búsqueda de pares. Las consultas tienen un límite de tiempo de ocho segundos. Los resultados con torrents anuncian 120 segundos de caché (navegador y edge) más diez minutos de `stale-while-revalidate`; los títulos sin torrents en la base se cachean sesenta segundos; los fallos no anuncian caché. `/health` comprueba que la aplicación responde, no la conectividad con la base de datos.
 
 ## Estructura
 
