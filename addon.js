@@ -14,7 +14,7 @@ const { createClient } = require('@supabase/supabase-js');
 // ---------------------------------------------------------------------------
 const manifest = {
   id: 'org.comunidad.torrents.espanol',
-  version: '1.2.2',
+  version: '1.2.3',
   name: 'Nexo Play',
   description: 'Películas, series y anime en español e inglés. Encuentra opciones de reproducción con información de idioma y calidad, en un solo lugar.',
   resources: ['stream'],
@@ -121,6 +121,18 @@ function extractInfoHashFromMagnet(magnetUrl) {
   return null;
 }
 
+function extractTrackersFromMagnet(magnetUrl) {
+  if (typeof magnetUrl !== 'string') return [];
+  try {
+    const url = new URL(magnetUrl);
+    if (url.protocol !== 'magnet:') return [];
+    return url.searchParams.getAll('tr')
+      .map(tr => tr.trim())
+      .filter(tr => /^(udp|https?):\/\//i.test(tr))
+      .slice(0, 10);
+  } catch (_) { /* magnet malformado */ return []; }
+}
+
 function formatSizeGB(row) {
   for (const [value, divisor] of [[row.size_bytes, 1024 ** 3], [row.size_gb, 1], [row.size, 1024 ** 3]]) {
     if (value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)) && Number(value) >= 0) return (Number(value) / divisor).toFixed(2);
@@ -210,7 +222,9 @@ async function streamHandler({ type, id }, clientFactory = getSupabaseClient) {
 
     if (!data || data.length === 0) {
       console.log(`[Stream] Sin resultados para ${imdbId}${isSeries ? ` S:${season} E:${episode}` : ''}`);
-      return { streams: [] };
+      // Respuesta vacía válida (no es un fallo): se cachea brevemente para no
+      // repetir la consulta por cada cliente que pregunte por el mismo título.
+      return { streams: [], cacheMaxAge: 60 };
     }
 
     console.log(`[Stream] ${data.length} resultados para ${imdbId} en ${Date.now() - start}ms`);
@@ -221,10 +235,10 @@ async function streamHandler({ type, id }, clientFactory = getSupabaseClient) {
         // --- InfoHash con fallback a magnetUrl ---
         let infoHash = row.info_hash || row.infoHash || row.hash || null;
         if (infoHash) infoHash = infoHash.toString().trim().toLowerCase();
-        
+
+        const magnet = row.magnet_url || row.magnetUrl || row.magnet || null;
         if (!isValidInfoHash(infoHash)) {
           // Intentar extraer de magnet
-          const magnet = row.magnet_url || row.magnetUrl || row.magnet || null;
           const extracted = extractInfoHashFromMagnet(magnet);
           if (extracted) infoHash = extracted;
         }
@@ -233,13 +247,13 @@ async function streamHandler({ type, id }, clientFactory = getSupabaseClient) {
           return null;
         }
 
-        return buildStream(row, infoHash);
+        return buildStream(row, infoHash, extractTrackersFromMagnet(magnet), imdbId);
       })
       .filter(Boolean)
       .filter((stream, index, all) => all.findIndex(item => item.infoHash === stream.infoHash && item.fileIdx === stream.fileIdx) === index);
 
     console.log(`[Stream] → Enviando ${streams.length} streams válidos`);
-    return { streams, cacheMaxAge: 120 };
+    return { streams, cacheMaxAge: 120, staleRevalidate: 600 };
 
   } catch (err) {
     console.error('[Stream] Excepción no controlada:', err.message, err.stack?.slice(0, 500));
@@ -251,7 +265,7 @@ builder.defineStreamHandler(streamHandler);
 // ---------------------------------------------------------------------------
 // Formateadores de Stream
 // ---------------------------------------------------------------------------
-function buildStream(row, infoHash) {
+function buildStream(row, infoHash, magnetTrackers = [], imdbId = '') {
   const langTag = getLanguageTag(row);
   const resolution = getResolutionTag(row);
   const sizeGB = formatSizeGB(row);
@@ -276,10 +290,16 @@ function buildStream(row, infoHash) {
     `⭐ Calidad: ${quality}`
   ];
 
-  // Fuentes alternativas para tracker (opcional pero ayuda)
-  const sources = row.trackers ? 
-    (Array.isArray(row.trackers) ? row.trackers : [row.trackers]) : 
-    undefined;
+  // Trackers del torrent: los del magnet original más los de la columna
+  // trackers, normalizados como fuentes "tracker:" de Stremio, sin duplicados
+  // y con un máximo de diez. Stremio los usa para encontrar pares más rápido.
+  const dbTrackers = Array.isArray(row.trackers) ? row.trackers
+    : (typeof row.trackers === 'string' && row.trackers.trim() ? [row.trackers] : []);
+  const trackers = [...new Set([...magnetTrackers, ...dbTrackers
+    .map(tr => typeof tr === 'string' ? tr.trim() : '')
+    .filter(tr => /^(udp|https?):\/\//i.test(tr))])]
+    .slice(0, 10)
+    .map(tr => tr.startsWith('tracker:') ? tr : `tracker:${tr}`);
 
   return {
     name,
@@ -287,11 +307,11 @@ function buildStream(row, infoHash) {
     infoHash: infoHash.toLowerCase(),
     ...(Number.isSafeInteger(row.file_idx ?? row.fileIdx) && (row.file_idx ?? row.fileIdx) >= 0 ? { fileIdx: row.file_idx ?? row.fileIdx } : {}),
     behaviorHints: {
-      bingeGroup: `nexo-play-${resolution.toLowerCase()}-${langTag.toLowerCase()}`,
-      // Si tu tabla tiene edad/prioridad, úsala aquí
+      // Identifica título + calidad + idioma: la reproducción continua solo
+      // agrupa episodios de la misma serie, nunca títulos distintos.
+      bingeGroup: `nexo-play|${imdbId}|${resolution.toLowerCase()}-${langTag.toLowerCase()}`
     },
-    // Fuentes opcionales - Stremio las usa para complementar el magnet
-    ...(sources ? { sources } : {})
+    ...(trackers.length ? { sources: trackers } : {})
   };
 }
 
@@ -301,4 +321,4 @@ function buildStream(row, infoHash) {
 const addonInterface = builder.getInterface();
 module.exports = addonInterface;
 
-module.exports.helpers = { parseStremioId, getLanguageTag, formatSizeGB, extractInfoHashFromMagnet, streamHandler };
+module.exports.helpers = { parseStremioId, getLanguageTag, formatSizeGB, extractInfoHashFromMagnet, extractTrackersFromMagnet, streamHandler };
