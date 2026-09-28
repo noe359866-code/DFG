@@ -12,7 +12,7 @@ for (const [name, handler] of [['local', require('../app')], ['vercel', require(
     const manifestResponse = await get('/manifest.json');
     assert.equal(manifestResponse.headers.get('cache-control'), 'public, s-maxage=300, stale-while-revalidate=3600');
     const manifest = await (await get('/manifest.json')).json();
-    assert.equal(manifest.version, '1.2.3');
+    assert.equal(manifest.version, '1.2.4');
     assert.deepEqual(manifest.stremioAddonsConfig, {
       issuer: 'https://stremio-addons.net',
       signature: 'eyJhbGciOiJkaXIiLCJlbmMiOiJBMTI4Q0JDLUhTMjU2In0..g42ZuVG1dWzDRcFDdl2fSg.XTSmojbOIelhstXtRYc4quyFOTqqzzpM5A37XgsUCQFnXn0-CvOqL4-_cB0Ici9r4PKbof275NCBIoyHkfXYEcjZGKHnoEekJ06szsimbfujDbMlELhpntPJ-KR5uH0n.nl6gG0luYfRKGH23oOt-YQ'

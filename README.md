@@ -1,6 +1,6 @@
-# Nexo Play · 1.2.2
+# Nexo Play · 1.2.4
 
-![Nexo Play](public/brand.png)
+![Nexo Play](public/assets/brand.png)
 
 **Tu próxima historia, más cerca.** Películas, series y anime en español e inglés. Encuentra opciones de reproducción con información de idioma y calidad, en un solo lugar.
 

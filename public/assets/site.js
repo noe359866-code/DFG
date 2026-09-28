@@ -1,7 +1,10 @@
 const manifestUrl = new URL('/manifest.json', window.location.origin).href;
 const input = document.getElementById('url');
 input.value = manifestUrl;
-document.getElementById('install').href = `stremio://${window.location.host}/manifest.json`;
+const installLink = document.getElementById('install');
+const host = window.location.host;
+const isSecure = window.location.protocol === 'https:';
+installLink.href = isSecure ? `stremio://${host}/manifest.json` : manifestUrl;
 document.getElementById('copy').addEventListener('click', async () => {
   const feedback = document.getElementById('feedback');
   try {

@@ -65,13 +65,29 @@ test('database errors return empty streams', async () => {
 });
 test('magnet trackers travel in sources and bingeGroup identifies the title', async () => {
   const magnet = `magnet:?xt=urn:btih:${hash}&tr=udp://tracker.opentrackr.org:1337&tr=udp://open.demonii.com:1337`;
-  const m = mock([{ magnet, title: 'Ejemplo 1080p', seeders: 3 }]);
+  const m = mock([{ magnet, title: 'Ejemplo 1080p', seeders: 3, size: '2 GB' }]);
   const result = await streamHandler({ type: 'movie', id: 'tt1234567' }, m.client);
   assert.equal(result.streams.length, 1);
   assert.deepEqual(result.streams[0].sources, ['tracker:udp://tracker.opentrackr.org:1337', 'tracker:udp://open.demonii.com:1337']);
   assert.match(result.streams[0].behaviorHints.bingeGroup, /tt1234567/);
+  assert.equal(result.streams[0].behaviorHints.videoSize, 2147483648);
+  assert.equal(result.streams[0].behaviorHints.filename, 'Ejemplo 1080p');
   assert.equal(result.cacheMaxAge, 120);
   assert.ok(result.staleRevalidate >= result.cacheMaxAge);
+});
+test('smart ranking prioritizes resolution, language and seeders, with default trackers fallback', async () => {
+  const m = mock([
+    { info_hash: '1'.repeat(40), title: 'Movie 720p', seeders: 50, audio: 'English' },
+    { info_hash: '2'.repeat(40), title: 'Movie 1080p', seeders: 5, audio: 'Spanish' },
+    { info_hash: '3'.repeat(40), title: 'Movie 4K', seeders: 2, audio: 'Spanish' }
+  ]);
+  const result = await streamHandler({ type: 'movie', id: 'tt1234567' }, m.client);
+  assert.equal(result.streams.length, 3);
+  assert.equal(result.streams[0].infoHash, '3'.repeat(40)); // 4K first
+  assert.equal(result.streams[1].infoHash, '2'.repeat(40)); // 1080p second
+  assert.equal(result.streams[2].infoHash, '1'.repeat(40)); // 720p third
+  assert.ok(result.streams[0].sources.length > 0, 'debe incluir trackers por defecto cuando no hay trackers en DB');
+  assert.match(result.streams[0].sources[0], /^tracker:udp:\/\//);
 });
 test('empty results announce a short cache; failures announce none', async () => {
   assert.deepEqual(await streamHandler({ type: 'movie', id: 'tt1234567' }, mock([]).client), { streams: [], cacheMaxAge: 60 });
