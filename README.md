@@ -12,6 +12,10 @@ Abre la página de tu despliegue y pulsa **Añadir a Stremio**, o copia su enlac
 
 El identificador histórico se conserva para mantener la identidad del complemento existente. El nombre visible cambia a **Nexo Play**; ya no promete contenido exclusivamente en español.
 
+## Soporte
+
+¿Problemas para instalar, ideas o torrents caídos? Únete al canal de soporte en Discord: <https://discord.gg/qEcdvvcA4>
+
 ## Desarrollo y despliegue
 
 Requiere Node.js 22.

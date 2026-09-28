@@ -21,6 +21,7 @@ for (const [name, handler] of [['local', require('../app')], ['vercel', require(
     const landing = await (await get('/', { headers: { 'x-forwarded-host': '<script>alert(1)</script>' } })).text();
     assert.match(landing, /Nexo Play/);
     assert.doesNotMatch(landing, /<script>alert/);
+    assert.match(landing, /href="https:\/\/discord\.gg\/qEcdvvcA4" target="_blank" rel="noopener noreferrer"/, 'el canal de soporte de Discord debe estar en la portada');
     assert.equal((await get('/assets/brand.png')).headers.get('content-type'), 'image/png');
     assert.equal((await get('/health')).status, 200);
     assert.equal((await get('/health-anything')).status, 404);
