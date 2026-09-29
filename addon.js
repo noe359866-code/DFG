@@ -62,14 +62,55 @@ function envValue(name) {
   return typeof process !== 'undefined' && process.env ? process.env[name] : undefined;
 }
 
+// Al copiar desde el panel de Supabase es habitual arrastrar espacios, saltos
+// de línea o comillas; eso rompe el JWT de forma silenciosa. También se
+// descartan los placeholders de .env.example / .dev.vars.example para no
+// intentar conexiones con credenciales de muestra.
+function isPlaceholderValue(value) {
+  const text = value.toLowerCase();
+  return text.startsWith('tu_') || text.includes('xxxxxxxx') || text === 'changeme';
+}
+
+function cleanEnvValue(name) {
+  const raw = envValue(name);
+  if (typeof raw !== 'string') return undefined;
+  const value = raw.trim().replace(/^["']+|["']+$/g, '').trim();
+  if (!value || isPlaceholderValue(value)) return undefined;
+  return value;
+}
+
+// Acepta la URL con o sin esquema y con barra final, como se copia desde el
+// panel; devuelve null si no parece un host válido.
+function normalizeSupabaseUrl(raw) {
+  if (!raw) return null;
+  let url = raw.replace(/\/+$/, '');
+  if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+  return /^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)+(:\d{1,5})?$/i.test(url) ? url : null;
+}
+
+// Estado de la configuración sin filtrar valores: pensado para /health y
+// registros, nunca expone la clave ni la URL completas.
+function configStatus() {
+  const rawUrl = cleanEnvValue('SUPABASE_URL');
+  const url = normalizeSupabaseUrl(rawUrl);
+  const keyType = cleanEnvValue('SUPABASE_SERVICE_ROLE_KEY') ? 'service_role'
+    : cleanEnvValue('SUPABASE_ANON_KEY') ? 'anon' : 'none';
+  return {
+    configured: Boolean(url && keyType !== 'none'),
+    url: rawUrl ? (url ? 'ok' : 'invalid') : 'missing',
+    keyType
+  };
+}
+
 function getSupabaseClient() {
   if (supabaseClient) return supabaseClient;
 
-  const supabaseUrl = envValue('SUPABASE_URL');
-  const supabaseKey = envValue('SUPABASE_SERVICE_ROLE_KEY') || envValue('SUPABASE_ANON_KEY');
+  const supabaseUrl = normalizeSupabaseUrl(cleanEnvValue('SUPABASE_URL'));
+  const supabaseKey = cleanEnvValue('SUPABASE_SERVICE_ROLE_KEY') || cleanEnvValue('SUPABASE_ANON_KEY');
 
   if (!supabaseUrl || !supabaseKey) {
-    console.warn('[Addon] ⚠️ Faltan variables SUPABASE_URL / SUPABASE_ANON_KEY');
+    const status = configStatus();
+    console.warn(`[Addon] ⚠️ Supabase sin configurar (url: ${status.url}, clave: ${status.keyType}). Revisa SUPABASE_URL / SUPABASE_ANON_KEY.`);
     return null;
   }
 
@@ -238,6 +279,31 @@ function getResolutionTag(row) {
 // ---------------------------------------------------------------------------
 // 4. STREAM HANDLER - Lógica principal
 // ---------------------------------------------------------------------------
+
+// Errores que suelen resolverse solos al instante (red cortada, cold starts,
+// 5xx puntuales): vale la pena un segundo intento antes de rendirse.
+const TRANSIENT_ERROR = /network|fetch|timed?\s*out|timeout|econn|socket|abort|gateway|temporar|502|503|504/i;
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// Hasta 2 intentos por consulta; los errores permanentes (401, sintaxis, RLS)
+// no se reintentan para no duplicar la espera del usuario.
+async function runQuery(query, label) {
+  let lastResult = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const started = Date.now();
+    const result = await query.abortSignal(AbortSignal.timeout(8000));
+    lastResult = result;
+    if (!result.error) return result;
+    const err = result.error;
+    const blob = `${err.message || ''} ${err.details || ''} ${err.hint || ''} ${err.code || ''}`;
+    const transient = TRANSIENT_ERROR.test(blob);
+    console.warn(`[Supabase] Error en ${label} (intento ${attempt}/2, ${Date.now() - started}ms): ${err.message || 'desconocido'}${transient && attempt < 2 ? ' — reintentando…' : ''}`);
+    if (!transient || attempt === 2) return result;
+    await sleep(300);
+  }
+  return lastResult;
+}
+
 async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClient) {
   const start = Date.now();
   console.log(`[Stream] → type=${type} id=${id}`);
@@ -282,7 +348,34 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
     }
     // Para movie no filtramos season/episode aunque existan nulos en DB
 
-    const { data, error } = await query.abortSignal(AbortSignal.timeout(8000));
+    let { data, error } = { data: null, error: null };
+    let seasonPack = null;
+    {
+      const result = await runQuery(query, `consulta ${imdbId}`);
+      data = result.data;
+      error = result.error;
+    }
+
+    // Sin episodio exacto: los packs de temporada completa (episode NULL)
+    // también reproducen el capítulo; se ofrecen etiquetados como PACK.
+    if (!error && isSeries && season !== null && episode !== null && (!data || data.length === 0)) {
+      console.log(`[Stream] Sin episodio exacto; buscando pack de la temporada ${season} para ${imdbId}`);
+      const packQuery = supabase
+        .from('torrents')
+        .select('*')
+        .eq('imdb_id', imdbId)
+        .eq('season', season)
+        .is('episode', null)
+        .order('seeders', { ascending: false, nullsFirst: false })
+        .limit(10);
+      const pack = await runQuery(packQuery, `pack T${season} ${imdbId}`);
+      if (!pack.error && pack.data && pack.data.length > 0) {
+        data = pack.data;
+        seasonPack = season;
+      } else if (pack.error) {
+        console.error('[Supabase] Error query pack:', pack.error.message, pack.error.details || '');
+      }
+    }
 
     if (error) {
       console.error('[Supabase] Error query:', error.message, error.details || '');
@@ -318,7 +411,7 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
 
         const magnetTrackers = extractTrackersFromMagnet(magnet);
         const magnetTitle = extractTitleFromMagnet(magnet);
-        return buildStreamEntry(row, infoHash, magnetTrackers, imdbId, magnetTitle);
+        return buildStreamEntry(row, infoHash, magnetTrackers, imdbId, magnetTitle, seasonPack);
       })
       .filter(Boolean);
 
@@ -464,7 +557,9 @@ function compareStreamEntries(a, b) {
   return (b.sizeBytes ?? 0) - (a.sizeBytes ?? 0);
 }
 
-function buildStreamEntry(row, infoHash, magnetTrackers = [], imdbId = '', magnetTitle = null) {
+// seasonPack: número de temporada cuando la fila es un pack completo en vez
+// del episodio exacto (se etiqueta para que el usuario sepa qué descarga).
+function buildStreamEntry(row, infoHash, magnetTrackers = [], imdbId = '', magnetTitle = null, seasonPack = null) {
   const metadata = { ...row, name: row.name || magnetTitle };
   const langTag = getLanguageTag(metadata);
   const resolution = getResolutionTag(metadata);
@@ -480,11 +575,12 @@ function buildStreamEntry(row, infoHash, magnetTrackers = [], imdbId = '', magne
   const quality = sanitizeOneLine(row.quality) || resolution;
 
   // name: cabecera corta visible en lista (máx ~30 chars)
-  const name = `Nexo Play\n[${langTag}] ${resolution}`;
+  const name = `Nexo Play\n[${langTag}] ${resolution}${seasonPack !== null ? ` · PACK T${seasonPack}` : ''}`;
 
   // title: multilínea con detalles (Stremio lo muestra al hacer hover)
   const titleLines = [
     `🎬 ${titleDisplay}`,
+    ...(seasonPack !== null ? [`🗂️ Pack de la temporada ${seasonPack} completa (elige el episodio al reproducir)`] : []),
     `🔊 Audio: ${audio} | 📝 Subs: ${subs}`,
     `💾 Tamaño: ${sizeGB} GB`,
     `👥 Seeders: ${seeders}  |  🌱 Leechers: ${row.leechers ?? '—'}`,
@@ -534,4 +630,4 @@ function buildStream(row, infoHash, magnetTrackers = [], imdbId = '') {
 const addonInterface = builder.getInterface();
 module.exports = addonInterface;
 
-module.exports.helpers = { parseStremioId, getLanguageTag, formatSizeGB, extractInfoHashFromMagnet, extractTrackersFromMagnet, streamHandler, createCachedStreamHandler, cachedStreamHandler, getSupabaseClient, configure };
+module.exports.helpers = { parseStremioId, getLanguageTag, formatSizeGB, extractInfoHashFromMagnet, extractTrackersFromMagnet, streamHandler, createCachedStreamHandler, cachedStreamHandler, getSupabaseClient, configure, configStatus, normalizeSupabaseUrl, cleanEnvValue };

@@ -138,8 +138,14 @@ async function streamResponse(match, url, ctx) {
   }));
 }
 
+// /health confirma que el Worker responde y si las variables de Supabase son
+// válidas (sin exponer sus valores), para diagnosticar despliegues al instante.
 function healthResponse() {
-  return decorate(new Response(JSON.stringify({ status: 'ok', version: addon.manifest.version }), {
+  return decorate(new Response(JSON.stringify({
+    status: 'ok',
+    version: addon.manifest.version,
+    supabase: addon.helpers.configStatus()
+  }), {
     headers: { 'Content-Type': JSON_TYPE, 'Cache-Control': 'no-store' }
   }));
 }

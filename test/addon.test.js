@@ -216,3 +216,73 @@ test('stale streams are not returned after the absolute deadline', async () => {
   assert.deepEqual(await cached(args), { streams: [] });
   assert.equal(calls, 2);
 });
+
+// --- Entorno, reintentos y packs de temporada (1.4.0) ---
+
+test('environment values are trimmed, unquoted and placeholders rejected', t => {
+  const { configure, getSupabaseClient, configStatus, cleanEnvValue, normalizeSupabaseUrl } = addon.helpers;
+  t.after(() => configure(null));
+
+  configure({ SUPABASE_URL: '  https://demo.supabase.co/  ', SUPABASE_ANON_KEY: '  "clave real" \n' });
+  assert.equal(cleanEnvValue('SUPABASE_URL'), 'https://demo.supabase.co/');
+  assert.equal(cleanEnvValue('SUPABASE_ANON_KEY'), '"clave real" \n'.trim().replace(/^["']+|["']+$/g, '').trim());
+  const client = getSupabaseClient();
+  assert.ok(client, 'acepta credenciales con espacios o comillas alrededor');
+  assert.equal(client.supabaseUrl, 'https://demo.supabase.co');
+  assert.deepEqual(configStatus(), { configured: true, url: 'ok', keyType: 'anon' });
+
+  configure({ SUPABASE_URL: 'https://xxxxxxxx.supabase.co', SUPABASE_ANON_KEY: 'tu_clave_anon' });
+  assert.equal(getSupabaseClient(), null, 'los placeholders de .env.example no conectan');
+  assert.deepEqual(configStatus(), { configured: false, url: 'missing', keyType: 'none' });
+
+  configure({ SUPABASE_URL: 'demo.supabase.co', SUPABASE_ANON_KEY: 'k', SUPABASE_SERVICE_ROLE_KEY: 's' });
+  assert.equal(normalizeSupabaseUrl('demo.supabase.co'), 'https://demo.supabase.co');
+  assert.equal(configStatus().keyType, 'service_role', 'la clave privilegiada tiene prioridad');
+
+  configure({ SUPABASE_URL: 'no es una url', SUPABASE_ANON_KEY: 'k' });
+  assert.equal(configStatus().url, 'invalid');
+  configure(null);
+  assert.deepEqual(configStatus(), { configured: false, url: 'missing', keyType: 'none' });
+});
+
+test('transient database errors are retried once; permanent ones are not', async () => {
+  let attempts = 0;
+  const query = {};
+  for (const method of ['from', 'select', 'eq', 'order', 'limit']) query[method] = () => query;
+  query.abortSignal = async () => {
+    attempts++;
+    return attempts === 1
+      ? { data: null, error: { message: 'Network connection lost.' } }
+      : { data: [{ info_hash: hash, seeders: 9 }], error: null };
+  };
+  const result = await streamHandler({ type: 'movie', id: 'tt1234567' }, () => query);
+  assert.equal(attempts, 2, 'un corte de red reintenta y acaba mostrando el contenido');
+  assert.equal(result.streams.length, 1);
+
+  let permanent = 0;
+  query.abortSignal = async () => { permanent++; return { data: null, error: { message: 'JWT expired' } }; };
+  const denied = await streamHandler({ type: 'movie', id: 'tt7654321' }, () => query);
+  assert.equal(permanent, 1, 'los errores permanentes no duplican la espera');
+  assert.deepEqual(denied, { streams: [] });
+});
+
+test('series fall back to season packs when the exact episode is missing', async () => {
+  const usedIs = [];
+  const query = {};
+  for (const method of ['from', 'select', 'eq', 'order', 'limit']) query[method] = () => query;
+  query.is = (...args) => { usedIs.push(args); return query; };
+  query.abortSignal = async () => usedIs.length
+    ? { data: [{ info_hash: hash, title: 'Temporada completa 1080p Spanish', seeders: 4 }], error: null }
+    : { data: [], error: null };
+
+  const result = await streamHandler({ type: 'series', id: 'tt1234567:2:5' }, () => query);
+  assert.deepEqual(usedIs, [['episode', null]], 'el fallback pregunta por episodios NULL (packs)');
+  assert.equal(result.streams.length, 1);
+  assert.match(result.streams[0].name, /PACK T2/);
+  assert.match(result.streams[0].title, /temporada 2 completa/);
+
+  usedIs.length = 0;
+  const movies = await streamHandler({ type: 'movie', id: 'tt1234567' }, () => query);
+  assert.deepEqual(movies, { streams: [], cacheMaxAge: 60 });
+  assert.equal(usedIs.length, 0, 'las películas nunca consultan packs');
+});

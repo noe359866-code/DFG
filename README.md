@@ -1,10 +1,17 @@
-# Nexo Play · 1.3.0
+# Nexo Play · 1.4.0
 
 ![Nexo Play](public/assets/brand.png)
 
 **Tu próxima historia, más cerca.** Películas, series y anime en español e inglés. Encuentra opciones de reproducción con información de idioma y calidad, en un solo lugar.
 
 Complemento de fuentes de reproducción para Stremio. No incluye un catálogo propio; las opciones aparecen en las fichas compatibles. Idiomas, calidad y disponibilidad dependen de los archivos disponibles. Utiliza únicamente contenido que tengas derecho a reproducir.
+
+## Novedades de 1.4.0
+
+- **Más contenido visible:** si una serie o anime no tiene el episodio exacto en la base, se ofrecen los **packs de su temporada completa** (`episode` NULL) etiquetados como `PACK T<temporada>`, en lugar de responder vacío.
+- **Más rápido ante cortes puntuales:** las consultas reintentan una vez (pausa de 300 ms) frente a errores de red, timeouts y 502/503/504; los errores permanentes no se reintentan y cada intento mantiene su límite de ocho segundos.
+- **Environment a prueba de copiar y pegar:** los valores de `SUPABASE_URL` y las claves se limpian de espacios, saltos de línea y comillas; la URL admite pegarse sin `https://` y los placeholders de los archivos `.example` se descartan en vez de intentar conectar.
+- **`/health` diagnostica tu despliegue:** indica `supabase.configured`, si la URL es `ok`/`invalid`/`missing` y el tipo de clave activa (`anon`/`service_role`/`none`), sin exponer los valores.
 
 ## Novedades de 1.3.0
 
@@ -77,16 +84,17 @@ npm audit --omit=dev
 
 Estas instrucciones son para administradores, no forman parte de la descripción pública del complemento.
 
-- `SUPABASE_URL`: URL del proyecto.
+- `SUPABASE_URL`: URL del proyecto. Se acepta con o sin `https://` y con barra final; se recorta de espacios y comillas.
 - `SUPABASE_ANON_KEY`: clave para consultas con políticas RLS de solo lectura.
 - `SUPABASE_SERVICE_ROLE_KEY`: alternativa privilegiada, **solo en servidor**. Si existe tiene prioridad; evita utilizarla si no es necesaria.
+- Los placeholders de `.env.example` / `.dev.vars.example` se ignoran solos, y `/health` confirma si la configuración quedó activa (`supabase.configured`) sin exponer los valores.
 - No publiques `.env` ni credenciales. Ocultar la infraestructura en la descripción no sustituye RLS ni el control de acceso. Si alguna clave real fue publicada, revócala y rótala.
 
-La aplicación consulta `torrents` por `imdb_id`; para series/anime también exige `season` y `episode`. Ordena por `seeders` descendente, con nulos al final y un límite de 25 filas. Se recomienda un índice sobre `(imdb_id, season, episode)` en bases grandes. No se ejecutan migraciones automáticamente.
+La aplicación consulta `torrents` por `imdb_id`; para series/anime también exige `season` y `episode`, con **segunda consulta automática a packs de temporada** (`episode` NULL, hasta 10 filas, etiquetados `PACK`) cuando el episodio exacto no existe. Ordena por `seeders` descendente, con nulos al final y un límite de 25 filas. Ante errores transitorios (red, timeout, 502/503/504) cada consulta reintenta una vez tras 300 ms; los errores permanentes no se reintentan. Se recomienda un índice sobre `(imdb_id, season, episode)` en bases grandes. No se ejecutan migraciones automáticamente.
 
 Campos utilizados: `info_hash` (alternativas `infoHash`, `hash`) o `magnet_url` (`magnetUrl`, `magnet`), título, idioma/audio, resolución/calidad y tamaño. Opcionalmente `file_idx`/`fileIdx` indica el archivo del torrent. Los campos de metadatos ausentes se muestran como no indicados, sin inventar idioma, subtítulos ni calidad.
 
-Los magnets admiten BTIH hexadecimal o base32; las filas sin hash válido se descartan. Los trackers del magnet original (`tr=`) y los de la columna `trackers` viajan en `sources` de cada stream, normalizados y sin duplicados, para acelerar la búsqueda de pares. Las consultas tienen un límite de tiempo de ocho segundos. Además, cada instancia mantiene hasta 250 respuestas en memoria con 120 segundos de frescura y hasta 600 segundos adicionales para revalidar fuentes no vacías; agrupa consultas simultáneas idénticas. No se comparten entre instancias ni se almacenan errores: tras un fallo de la base de datos no se repite la consulta hasta pasados quince segundos, y las respuestas vacías confirmadas se cachean sesenta segundos. Los resultados con torrents anuncian 120 segundos de caché (navegador y edge) más diez minutos de `stale-while-revalidate` y `stale-if-error`; los fallos no anuncian caché. El manifiesto anuncia `max-age`/`s-maxage` de cinco minutos con `stale-while-revalidate` de una hora, sirve `304` con su ETag y cachea en el borde ignorando la cadena de consulta. `/health` comprueba que la aplicación responde, no la conectividad con la base de datos.
+Los magnets admiten BTIH hexadecimal o base32; las filas sin hash válido se descartan. Los trackers del magnet original (`tr=`) y los de la columna `trackers` viajan en `sources` de cada stream, normalizados y sin duplicados, para acelerar la búsqueda de pares. Las consultas tienen un límite de tiempo de ocho segundos. Además, cada instancia mantiene hasta 250 respuestas en memoria con 120 segundos de frescura y hasta 600 segundos adicionales para revalidar fuentes no vacías; agrupa consultas simultáneas idénticas. No se comparten entre instancias ni se almacenan errores: tras un fallo de la base de datos no se repite la consulta hasta pasados quince segundos, y las respuestas vacías confirmadas se cachean sesenta segundos. Los resultados con torrents anuncian 120 segundos de caché (navegador y edge) más diez minutos de `stale-while-revalidate` y `stale-if-error`; los fallos no anuncian caché. El manifiesto anuncia `max-age`/`s-maxage` de cinco minutos con `stale-while-revalidate` de una hora, sirve `304` con su ETag y cachea en el borde ignorando la cadena de consulta. `/health` confirma que la aplicación responde y que las variables de Supabase son válidas (sin exponer valores); no comprueba la conectividad con la base de datos.
 
 ## Estructura
 
