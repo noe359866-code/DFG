@@ -199,6 +199,7 @@ function extractTitleFromMagnet(magnetUrl) {
 }
 
 function sanitizeOneLine(str) {
+  if (Array.isArray(str)) str = str.filter(Boolean).join(', ');
   if (typeof str !== 'string') return '';
   return str.replace(/[\r\n\t\f\v]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
@@ -592,8 +593,8 @@ function buildStreamEntry(row, infoHash, magnetTrackers = [], imdbId = '', magne
   // trackers, con fallback a trackers públicos de alta disponibilidad.
   const trackers = buildTrackers(row.trackers, magnetTrackers);
 
-  const fileIdx = Number.isSafeInteger(row.file_idx ?? row.fileIdx) && (row.file_idx ?? row.fileIdx) >= 0
-    ? (row.file_idx ?? row.fileIdx)
+  const fileIdx = Number.isSafeInteger(row.file_index ?? row.file_idx ?? row.fileIdx) && (row.file_index ?? row.file_idx ?? row.fileIdx) >= 0
+    ? (row.file_index ?? row.file_idx ?? row.fileIdx)
     : undefined;
 
   const stream = {
