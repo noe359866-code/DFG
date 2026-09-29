@@ -1,0 +1,40 @@
+# Despliega el addon en Cloudflare Workers en cada push a main.
+# Requiere dos secretos del repositorio (uno por línea, crear en
+# GitHub → Settings → Secrets and variables → Actions):
+#   CLOUDFLARE_API_TOKEN  - token con permiso "Workers Scripts:Edit"
+#   CLOUDFLARE_ACCOUNT_ID - ID de cuenta (panel de Cloudflare, inicio)
+# Los secretos del addon (SUPABASE_URL, SUPABASE_ANON_KEY) se configuran UNA
+# vez con `npx wrangler secret put <NOMBRE>` y sobreviven a los despliegues.
+
+name: Deploy to Cloudflare Workers
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-cloudflare
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Pruebas
+        run: npm test
+
+      - name: Desplegar a Cloudflare Workers
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
