@@ -1,6 +1,6 @@
 {
   "name": "nexo-play-addon",
-  "version": "1.2.6",
+  "version": "1.2.7",
   "description": "Películas, series y anime en español e inglés para Stremio.",
   "main": "addon.js",
   "type": "commonjs",
@@ -38,5 +38,8 @@
   "overrides": {
     "path-to-regexp": "^0.1.13",
     "tmp": "^0.2.7"
+  },
+  "devDependencies": {
+    "wrangler": "^4.143.0"
   }
 }

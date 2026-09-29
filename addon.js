@@ -6,9 +6,25 @@
  * NO hace scraping ni DDL. Solo consulta la tabla public.torrents
  */
 
-const { waitUntil } = require('@vercel/functions');
-const { addonBuilder } = require('stremio-addon-sdk');
+// Deep import del builder: evita arrastrar express/getRouter (y sus deps de
+// Node) al bundle de Cloudflare Workers. En Vercel el comportamiento es igual.
+const addonBuilder = require('stremio-addon-sdk/src/builder');
 const { createClient } = require('@supabase/supabase-js');
+
+// ---------------------------------------------------------------------------
+// 0. KEEPALIVE MULTIPLATAFORMA
+// Cada plataforma inyecta su waitUntil vía setKeepAlive():
+//   - Vercel (api/index.js): waitUntil de @vercel/functions
+//   - Cloudflare Workers (worker.mjs): ctx.waitUntil nativo
+// Sin inyección (node server.js, pruebas) el trabajo en segundo plano se
+// ejecuta en fire-and-forget.
+// ---------------------------------------------------------------------------
+let keepAliveImplementation = promise => {
+  try { Promise.resolve(promise).catch(() => {}); } catch (_) { /* noop */ }
+};
+function setKeepAlive(implementation) {
+  if (typeof implementation === 'function') keepAliveImplementation = implementation;
+}
 
 // ---------------------------------------------------------------------------
 // 1. MANIFEST - Especificación oficial Stremio
@@ -57,9 +73,12 @@ function getSupabaseClient() {
     // Aunque no usamos realtime, el SDK lo inicializa igual
     let wsTransport = undefined;
     try {
-      wsTransport = require('ws');
+      // Node <22 necesita polyfill ws para el Realtime client de Supabase.
+      // Vercel (Node 22), Cloudflare Workers y los navegadores ya exponen
+      // WebSocket nativo, así que el require solo ocurre en Node antiguo.
+      if (typeof WebSocket === 'undefined') wsTransport = require('ws');
     } catch (_) {
-      // ws no instalado - en Vercel con Node 22+ no es necesario
+      // ws no instalado o plataforma sin necesidad de polyfill
     }
 
     const options = {
@@ -337,7 +356,7 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
 }
 // Cache por instancia con revalidación única y antigüedad máxima absoluta.
 function createCachedStreamHandler(handler, {
-  maxEntries = 250, now = Date.now, keepAlive = waitUntil, retryDelay = 15000
+  maxEntries = 250, now = Date.now, keepAlive = keepAliveImplementation, retryDelay = 15000
 } = {}) {
   const cache = new Map();
   const pending = new Map();
@@ -495,3 +514,5 @@ const addonInterface = builder.getInterface();
 module.exports = addonInterface;
 
 module.exports.helpers = { parseStremioId, getLanguageTag, formatSizeGB, extractInfoHashFromMagnet, extractTrackersFromMagnet, streamHandler, createCachedStreamHandler };
+
+module.exports.setKeepAlive = setKeepAlive;

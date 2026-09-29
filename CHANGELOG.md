@@ -1,5 +1,18 @@
 # Historial de cambios
 
+## 1.2.7 — 2026-09-29
+
+**Descripción de la actualización:** Nexo Play puede desplegarse ahora en Cloudflare Workers sin abandonar Vercel. El objetivo es contener el consumo del plan gratuito de Vercel: Workers free incluye 100.000 solicitudes al día y ancho de banda sin coste adicional, sin arranques en frío.
+
+- Nuevo `worker.mjs`: entrada para Cloudflare Workers con paridad de cabeceras respecto a `app.js` (CORS, 405/404, `no-store` en fallos de base de datos, `s-maxage` gemelo para el edge). El landing y los assets de `public/` se sirven como Static Assets, igual que el CDN de Vercel los entrega sin invocar la función.
+- Caché de edge con la Cache API de Workers en lugar del `s-maxage` de Vercel; `x-nexo-cache: hit|miss` permite verificar aciertos en producción. El manejo del SDK se replica exactamente: se serializa la respuesta completa, incluidos los TTL internos.
+- `addon.js` queda libre de plataforma: `setKeepAlive()` inyecta el `waitUntil` de cada plataforma (Vercel desde `api/index.js`, Workers desde `worker.mjs`, fire-and-forget en local y pruebas). El builder del SDK se importa por ruta directa para no arrastrar Express al bundle de Workers.
+- El polyfill `ws` de Supabase Realtime solo se requiere en Node sin `WebSocket` nativo (Node <22); Vercel, Workers y navegadores usan el nativo.
+- `wrangler.jsonc` con `nodejs_compat`, Static Assets y observabilidad; `public/_headers` replica las cabeceras públicas de `vercel.json`; `.dev.vars.example` para desarrollo local.
+- Pruebas nuevas del worker (`test/worker.test.js`): manifiesto, salud, CORS, métodos, rutas 404, HEAD, hidratación de variables y caché de edge con caché simulada. La suite completa (34 pruebas) sigue en verde para Vercel y Workers.
+
+No cambia la lógica de consultas ni el formato Stremio. Cambiar de hosting cambia la URL pública del addon: los usuarios deberán reinstalar con el enlace nuevo y la firma de stremio-addons.net corresponde al dominio verificado.
+
 ## 1.2.6 — 2026-09-28
 
 **Entrega de fuentes más ágil a Stremio:** respuestas comprimidas, actualización de fuentes recientes sin bloquear la entrega y mayor resistencia a fallos temporales de la base de datos.

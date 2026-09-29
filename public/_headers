@@ -1,0 +1,11 @@
+# Cabeceras para los Static Assets (landing y /assets/*) en Cloudflare.
+# Espejo de la sección "headers" de vercel.json.
+/*
+  Access-Control-Allow-Origin: *
+  Access-Control-Allow-Headers: *
+  Access-Control-Allow-Methods: GET, HEAD, OPTIONS
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+
+/assets/*
+  Cache-Control: public, max-age=86400

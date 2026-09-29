@@ -1,10 +1,16 @@
-# Nexo Play · 1.2.6
+# Nexo Play · 1.2.7
 
 ![Nexo Play](public/assets/brand.png)
 
 **Tu próxima historia, más cerca.** Películas, series y anime en español e inglés. Encuentra opciones de reproducción con información de idioma y calidad, en un solo lugar.
 
 Complemento de fuentes de reproducción para Stremio. No incluye un catálogo propio; las opciones aparecen en las fichas compatibles. Idiomas, calidad y disponibilidad dependen de los archivos disponibles. Utiliza únicamente contenido que tengas derecho a reproducir.
+
+## Novedades de 1.2.7
+
+- **Despliegue dual: Vercel y Cloudflare Workers.** Nuevo `worker.mjs` con paridad de cabeceras respecto a la versión Express/Vercel (CORS, `no-store` en fallos, `s-maxage` gemelo). El landing y los assets se sirven como Static Assets; el API usa la Cache API de Workers para el edge, con `x-nexo-cache: hit|miss` para verificar aciertos en producción.
+- `addon.js` ya no depende de la plataforma: cada entrada inyecta su `waitUntil` con `setKeepAlive()` (Vercel: `@vercel/functions`; Workers: `ctx.waitUntil`; local: fire-and-forget). El builder del SDK se importa directamente para no arrastrar Express al bundle de Workers.
+- El polyfill `ws` solo se carga en Node sin `WebSocket` nativo (Node <22).
 
 ## Novedades de 1.2.6
 
@@ -13,7 +19,7 @@ Complemento de fuentes de reproducción para Stremio. No incluye un catálogo pr
 - Compresión HTTP negociada (gzip/deflate) para reducir bytes transferidos, con compatibilidad para clientes sin compresión.
 - Cada magnet se analiza una vez por fila. La caché HTTP recibe el tiempo de vida restante, no un plazo nuevo en cada lectura.
 
-En Vercel, `waitUntil` mantiene activa la actualización después de responder. La caché sigue siendo por instancia y se pierde con reinicios; una instancia nueva o un título nunca consultado debe esperar a la base de datos. Las consultas mantienen su límite de ocho segundos. No se hacen consultas anticipadas a episodios que el usuario no solicitó.
+En Vercel y Cloudflare Workers, `waitUntil` mantiene activa la actualización después de responder. La caché sigue siendo por instancia y se pierde con reinicios; una instancia nueva o un título nunca consultado debe esperar a la base de datos. Las consultas mantienen su límite de ocho segundos. No se hacen consultas anticipadas a episodios que el usuario no solicitó.
 
 Ejecuta `npm run benchmark` para una medición **simulada** de consultas concurrentes, caché y compresión; no representa latencias de producción ni velocidad de reproducción P2P.
 
@@ -46,6 +52,27 @@ npm start
 
 El servidor escucha en `0.0.0.0:7000` (configurable con `PORT`). En Vercel, configura las variables de entorno en el proyecto y despliega con `vercel.json`. Local y serverless utilizan la misma aplicación HTTP.
 
+### Despliegue en Cloudflare Workers (alternativa a Vercel)
+
+El mismo código corre en Workers sin cambios de lógica: `worker.mjs` sirve el API y `public/` se publica como Static Assets.
+
+```sh
+npm ci
+npx wrangler login
+# Secretos del API (mismos nombres que .env):
+npx wrangler secret put SUPABASE_URL
+npx wrangler secret put SUPABASE_ANON_KEY
+# o SUPABASE_SERVICE_ROLE_KEY si la usas
+npm run deploy:cloudflare
+```
+
+Desarrollo local con `npm run dev:cloudflare` y las credenciales en `.dev.vars` (copia `.dev.vars.example`). Notas:
+
+- En `wrangler dev` local la Cache API no guarda aciertos (limitación conocida del modo local); en producción `x-nexo-cache: hit` confirma el edge. Cloudflare comprime las respuestas automáticamente, sin `compression`.
+- `wrangler.jsonc` define el worker, los assets y `nodejs_compat`. Las cabeceras públicas de los assets están en `public/_headers` (espejo de las de `vercel.json`).
+- **Cambiar de hosting cambia la URL pública del addon**: los usuarios deberán reinstalar con la URL nueva (p. ej. `https://nexo-play.<cuenta>.workers.dev/manifest.json`) y la firma de stremio-addons.net corresponde al dominio verificado. Con un dominio propio apuntado a Cloudflare el enlace se conserva.
+- Vercel y Workers pueden convivir; el cambio de la URL del manifiesto decide cuál sirve a los usuarios.
+
 ```sh
 npm test
 npm run test:manifest
@@ -73,7 +100,8 @@ Los magnets admiten BTIH hexadecimal o base32; las filas sin hash válido se des
 - `app.js`: rutas HTTP compartidas, CORS, imagen y manifiesto público.
 - `server.js`: arranque local.
 - `api/index.js`: adaptación de reescrituras de Vercel.
-- `public/`: página de instalación e imagen de marca generada con IA. `index.html` y `assets/` son archivos estáticos: Vercel los sirve desde su CDN sin invocar la función, y `/assets/` anuncia un día de caché.
+- `worker.mjs`: entrada para Cloudflare Workers (API) con `wrangler.jsonc`.
+- `public/`: página de instalación e imagen de marca generada con IA. `index.html` y `assets/` son archivos estáticos: Vercel los sirve desde su CDN y Cloudflare como Static Assets, sin invocar la función ni pagar invocación; `/assets/` anuncia un día de caché.
 - `test/`: pruebas unitarias y HTTP con datos simulados.
 
 La imagen se sirve desde el propio despliegue; no depende de un proveedor externo. El manifiesto HTTP incluye su URL absoluta. Las versiones fijadas mediante `overrides` corrigen dependencias transitivas del SDK sin degradarlo a una versión incompatible.

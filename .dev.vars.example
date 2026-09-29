@@ -1,0 +1,10 @@
+# Copia este archivo a .dev.vars para probar con `npm run dev:cloudflare`.
+# Son las mismas variables de .env (ver .env.example) pero leídas por wrangler.
+# En producción se configuran con: npx wrangler secret put <NOMBRE>
+
+SUPABASE_URL=https://xxxxxxxx.supabase.co
+# Opcional: clave privilegiada, SOLO servidor. Preferir ANON con RLS de lectura.
+# SUPABASE_SERVICE_ROLE_KEY=tu_clave_privada
+
+# Alternativa si usas políticas RLS públicas (solo lectura)
+SUPABASE_ANON_KEY=tu_clave_anon
