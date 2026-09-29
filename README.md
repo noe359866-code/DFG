@@ -90,6 +90,22 @@ Estas instrucciones son para administradores, no forman parte de la descripción
 - Los placeholders de `.env.example` / `.dev.vars.example` se ignoran solos, y `/health` confirma si la configuración quedó activa (`supabase.configured`) sin exponer los valores.
 - No publiques `.env` ni credenciales. Ocultar la infraestructura en la descripción no sustituye RLS ni el control de acceso. Si alguna clave real fue publicada, revócala y rótala.
 
+### Cambiar de la clave pública (anon) a la secret (service_role)
+
+Si con la clave `anon` las consultas devuelven vacío (p. ej. porque RLS no permite `SELECT` a `anon`), la alternativa más directa es usar la clave privilegiada **solo en servidor**:
+
+1. **Local:** define `SUPABASE_SERVICE_ROLE_KEY` en `.env` (también sirve `.dev.vars`). Si existe tiene prioridad sobre `SUPABASE_ANON_KEY`, que puedes omitir.
+2. **Producción:** `npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY` (y `SUPABASE_URL` si aún no está). No hace falta redeploy; la clave anon sobrante se elimina con `npx wrangler secret delete SUPABASE_ANON_KEY`.
+3. **Verifica** con `/health`: debe responder `supabase.configured: true` y `supabase.keyType: "service_role"`.
+
+La clave `service_role` **no debe aparecer jamás en el frontend, en `wrangler.toml` ni en Git** (`.env` y `.dev.vars` están en `.gitignore`). Si se expuso alguna vez —por ejemplo, pegada en un chat o en un commit—, rótala desde el dashboard de Supabase y vuelve a guardar el secret.
+
+Como alternativa más restrictiva que evita el secreto privilegiado, añade una política RLS de solo lectura para la clave anon y sigue usándola:
+
+```sql
+create policy "lectura pública" on torrents for select to anon using (true);
+```
+
 La aplicación consulta `torrents` por `imdb_id`; para series/anime también exige `season` y `episode`, con **segunda consulta automática a packs de temporada** (`episode` NULL, hasta 10 filas, etiquetados `PACK`) cuando el episodio exacto no existe. Ordena por `seeders` descendente, con nulos al final y un límite de 25 filas. Ante errores transitorios (red, timeout, 502/503/504) cada consulta reintenta una vez tras 300 ms; los errores permanentes no se reintentan. Se recomienda un índice sobre `(imdb_id, season, episode)` en bases grandes. No se ejecutan migraciones automáticamente.
 
 Campos utilizados: `info_hash` (alternativas `infoHash`, `hash`) o `magnet_url` (`magnetUrl`, `magnet`), título, idioma/audio, resolución/calidad y tamaño. Opcionalmente `file_idx`/`fileIdx` indica el archivo del torrent. Los campos de metadatos ausentes se muestran como no indicados, sin inventar idioma, subtítulos ni calidad.
