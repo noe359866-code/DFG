@@ -12,7 +12,7 @@ for (const [name, handler] of [['local', require('../app')], ['vercel', require(
     const manifestResponse = await get('/manifest.json');
     assert.equal(manifestResponse.headers.get('cache-control'), 'public, s-maxage=300, stale-while-revalidate=3600');
     const manifest = await (await get('/manifest.json')).json();
-    assert.equal(manifest.version, '1.2.4');
+    assert.equal(manifest.version, '1.2.6');
     assert.deepEqual(manifest.stremioAddonsConfig, {
       issuer: 'https://stremio-addons.net',
       signature: 'eyJhbGciOiJkaXIiLCJlbmMiOiJBMTI4Q0JDLUhTMjU2In0..g42ZuVG1dWzDRcFDdl2fSg.XTSmojbOIelhstXtRYc4quyFOTqqzzpM5A37XgsUCQFnXn0-CvOqL4-_cB0Ici9r4PKbof275NCBIoyHkfXYEcjZGKHnoEekJ06szsimbfujDbMlELhpntPJ-KR5uH0n.nl6gG0luYfRKGH23oOt-YQ'
@@ -53,4 +53,27 @@ test('sdk cache headers gain an s-maxage twin for the edge', () => {
   };
   assert.equal(run('max-age=120, stale-while-revalidate=600, public'), 's-maxage=120, max-age=120, stale-while-revalidate=600, public');
   assert.equal(run('no-store'), 'no-store');
+});
+
+test('HTTP negotiates gzip without changing content, and supports uncompressed clients', async t => {
+  const { gunzipSync } = require('node:zlib');
+  const server = http.createServer(require('../app'));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const request = encoding => new Promise((resolve, reject) => {
+    http.get({ hostname: '127.0.0.1', port: server.address().port, path: '/',
+      headers: { 'accept-encoding': encoding } }, res => {
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => resolve({ headers: res.headers, body: Buffer.concat(chunks) }));
+      res.on('error', reject);
+    }).on('error', reject);
+  });
+  const plain = await request('identity');
+  const gzip = await request('gzip');
+  assert.equal(plain.headers['content-encoding'], undefined);
+  assert.equal(gzip.headers['content-encoding'], 'gzip');
+  assert.match(gzip.headers.vary, /Accept-Encoding/i);
+  assert.deepEqual(gunzipSync(gzip.body), plain.body);
+  assert.ok(gzip.body.length < plain.body.length);
 });

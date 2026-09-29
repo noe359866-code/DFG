@@ -6,6 +6,7 @@ const hash = 'a'.repeat(40);
 test('consistent release and private public description', () => {
   assert.equal(addon.manifest.version, require('../package.json').version);
   assert.equal(addon.manifest.name, 'Nexo Play');
+  assert.ok(addon.manifest.description.includes('Grupo de soporte: https://discord.com/invite/qEcdvvcA4'));
   assert.doesNotMatch(addon.manifest.description, /supabase|public\.torrents|service_role/i);
 });
 test('public stremio-addons.net verification in manifest', () => {
@@ -92,4 +93,118 @@ test('smart ranking prioritizes resolution, language and seeders, with default t
 test('empty results announce a short cache; failures announce none', async () => {
   assert.deepEqual(await streamHandler({ type: 'movie', id: 'tt1234567' }, mock([]).client), { streams: [], cacheMaxAge: 60 });
   assert.deepEqual(await streamHandler({ type: 'movie', id: 'tt1234567' }, mock(null, { message: 'fallo' }).client), { streams: [] });
+});
+
+test('magnet title supplies language and resolution; 4k substrings are not quality', async () => {
+  const m = mock([{ magnet: `magnet:?xt=urn:btih:${hash}&dn=Example%201080p%20English` }]);
+  const result = await streamHandler({ type: 'movie', id: 'tt1234567' }, m.client);
+  assert.match(result.streams[0].name, /\[ENG\] 1080p/);
+  const other = await streamHandler({ type: 'movie', id: 'tt1234567' }, mock([{ info_hash: hash, title: '14km away' }]).client);
+  assert.match(other.streams[0].name, /N\/D$/);
+});
+test('cache coalesces requests, isolates returned objects and expires', async () => {
+  let calls = 0;
+  let clock = 0;
+  const cached = addon.helpers.createCachedStreamHandler(async () => {
+    calls++;
+    return { streams: [{ infoHash: hash }], cacheMaxAge: 60 };
+  }, { now: () => clock });
+  const args = { type: 'movie', id: 'tt1234567' };
+  const [a, b] = await Promise.all([cached(args), cached(args)]);
+  assert.equal(calls, 1);
+  a.streams.length = 0;
+  assert.equal(b.streams.length, 1);
+  assert.equal((await cached(args)).streams.length, 1);
+  clock = 60000;
+  await cached(args);
+  assert.equal(calls, 2);
+});
+test('cache bounded eviction, type isolation and failed-query retries', async () => {
+  let calls = 0;
+  const cached = addon.helpers.createCachedStreamHandler(async () => {
+    calls++;
+    return { streams: [], cacheMaxAge: 60 };
+  }, { maxEntries: 1 });
+  await cached({ type: 'series', id: 'tt1234567:1:1' });
+  await cached({ type: 'anime', id: 'tt1234567:1:1' });
+  await cached({ type: 'series', id: 'tt1234567:1:1' });
+  assert.equal(calls, 3);
+  await cached({ type: 'movie', id: 'invalid' });
+  assert.equal(calls, 3);
+  let failures = 0;
+  const failed = addon.helpers.createCachedStreamHandler(async () => {
+    failures++;
+    return { streams: [] };
+  });
+  await failed({ type: 'movie', id: 'tt1234567' });
+  await failed({ type: 'movie', id: 'tt1234567' });
+  assert.equal(failures, 2);
+  const rejected = addon.helpers.createCachedStreamHandler(async () => { throw Error('offline'); });
+  for (let i = 0; i < 2; i++) await assert.rejects(rejected({ type: 'movie', id: 'tt1234567' }), /offline/);
+});
+
+test('stale streams return before refresh finishes; one background refresh and decreasing TTL', async () => {
+  let clock = 0;
+  let calls = 0;
+  let release;
+  const tasks = [];
+  const cached = addon.helpers.createCachedStreamHandler(async () => {
+    calls++;
+    if (calls > 1) await new Promise(resolve => { release = resolve; });
+    return { streams: [{ infoHash: hash }], cacheMaxAge: 120, staleRevalidate: 600 };
+  }, { now: () => clock, keepAlive: task => tasks.push(task) });
+  const args = { type: 'movie', id: 'tt1234567' };
+  await cached(args);
+  clock = 30000;
+  assert.equal((await cached(args)).cacheMaxAge, 90);
+  clock = 125000;
+  const stale = await cached(args);
+  assert.equal(stale.cacheMaxAge, 0);
+  assert.equal(stale.staleRevalidate, 595);
+  assert.equal(stale.streams.length, 1);
+  await cached(args);
+  assert.equal(calls, 2);
+  assert.equal(tasks.length, 1);
+  release();
+  await tasks[0];
+  assert.equal((await cached(args)).cacheMaxAge, 120);
+});
+test('stale fallback retries with cooldown, never extends its deadline and replaces with confirmed empty', async () => {
+  let clock = 0;
+  let calls = 0;
+  const tasks = [];
+  const cached = addon.helpers.createCachedStreamHandler(async () => {
+    calls++;
+    if (calls === 1) return { streams: [{ infoHash: hash }], cacheMaxAge: 120, staleRevalidate: 600 };
+    if (calls === 2) throw Error('database unavailable');
+    return { streams: [], cacheMaxAge: 60 };
+  }, { now: () => clock, keepAlive: task => tasks.push(task) });
+  const args = { type: 'movie', id: 'tt1234567' };
+  await cached(args);
+  clock = 120000;
+  assert.equal((await cached(args)).streams.length, 1);
+  await tasks[0];
+  clock = 130000;
+  await cached(args);
+  assert.equal(calls, 2);
+  clock = 135000;
+  await cached(args);
+  await tasks[1];
+  assert.equal((await cached(args)).streams.length, 0);
+  clock = 200000;
+  await cached(args);
+  assert.equal(calls, 4, 'empty cache expires without stale fallback');
+});
+test('stale streams are not returned after the absolute deadline', async () => {
+  let clock = 0;
+  let calls = 0;
+  const cached = addon.helpers.createCachedStreamHandler(async () => {
+    calls++;
+    return calls === 1 ? { streams: [{ infoHash: hash }], cacheMaxAge: 120, staleRevalidate: 600 } : { streams: [] };
+  }, { now: () => clock });
+  const args = { type: 'movie', id: 'tt1234567' };
+  await cached(args);
+  clock = 720000;
+  assert.deepEqual(await cached(args), { streams: [] });
+  assert.equal(calls, 2);
 });

@@ -1,9 +1,12 @@
 const express = require('express');
 const path = require('node:path');
+const compression = require('compression');
 const { getRouter } = require('stremio-addon-sdk');
 const addon = require('./addon');
 const app = express();
 app.disable('x-powered-by');
+// gzip/deflate negociados; no comprimir imágenes ni respuestas pequeñas.
+app.use(compression({ threshold: 1024, level: 4 }));
 app.use((req, res, next) => {
   res.set({ 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*',
     'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS', 'X-Content-Type-Options': 'nosniff',
@@ -40,6 +43,8 @@ const edgeCacheControl = (req, res, next) => {
   };
   sdkRouter(req, res, next);
 };
+// Un fallo sin directivas del SDK nunca debe almacenarse por heurística.
+app.use('/stream', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 app.use(edgeCacheControl);
 app.use((req, res) => res.status(404).json({ error: 'No encontrado' }));
 app.use((err, req, res, next) => {

@@ -1,5 +1,36 @@
 # Historial de cambios
 
+## 1.2.6 — 2026-09-28
+
+**Entrega de fuentes más ágil a Stremio:** respuestas comprimidas, actualización de fuentes recientes sin bloquear la entrega y mayor resistencia a fallos temporales de la base de datos.
+
+- Caché stale-while-revalidate en memoria: entrega fuentes conocidas durante hasta 600 segundos después de sus 120 segundos de frescura, mientras una sola consulta las actualiza. Vercel utiliza `waitUntil` para completar el trabajo tras responder.
+- Los fallos de actualización no borran fuentes útiles ni prolongan su antigüedad máxima. Reintentos con pausa de 15 segundos; resultados vacíos confirmados reemplazan los anteriores y no se sirven caducados.
+- Corrección de TTL: las respuestas desde memoria anuncian únicamente la frescura restante para evitar renovar artificialmente la caché del navegador o CDN.
+- Compresión gzip/deflate negociada, nivel 4, sin cambiar el formato Stremio; clientes sin soporte siguen recibiendo JSON normal.
+- Un solo análisis de URL por magnet al construir las fuentes.
+- Respuestas de streams sin directivas de caché válidas usan `no-store`.
+- Benchmark reproducible con datos simulados y pruebas de revalidación, fallo, caducidad y negociación HTTP.
+
+No modifica la base de datos ni garantiza mayor velocidad de descarga P2P. Las mejoras deben medirse también en el despliegue real.
+
+## 1.2.5 — 2026-09-29
+
+**Descripción de la actualización:** Nexo Play incorpora un nuevo buscador web de fuentes por ID o enlace de IMDb, con filtros de idioma y calidad. Esta versión reduce consultas repetidas, agiliza la eliminación de duplicados y corrige la detección de idioma y resolución en títulos de enlaces magnet.
+
+### Nuevas funciones
+- Buscador en la página de instalación para películas, series y anime; selección de temporada y episodio, incluidos especiales (temporada cero).
+- Filtros locales de idioma y calidad sin nuevas consultas al servidor, contador de fuentes y mensajes de carga, resultados vacíos y errores.
+- Validación de enlaces IMDb, cancelación de búsquedas anteriores y límite de espera de doce segundos. Los metadatos se muestran como texto, nunca como HTML.
+
+### Rendimiento y correcciones
+- Caché en memoria por instancia, limitada a 250 respuestas: 120 segundos para resultados y 60 para búsquedas vacías. Las solicitudes simultáneas iguales comparten consulta; los fallos no se guardan.
+- Eliminación de duplicados con `Set`, sin recorrer repetidamente toda la lista; conserva archivos diferentes del mismo torrent.
+- El título del magnet también aporta idioma y calidad cuando faltan títulos en la fila. Textos como «14km» ya no se detectan como 4K.
+- Pruebas de regresión para caducidad, concurrencia, aislamiento de respuestas, expulsión de caché y recuperación tras fallos.
+
+El buscador no es un catálogo ni busca títulos por nombre. No se modifica el esquema de la base de datos. Las mejoras de rendimiento son de implementación; no se ha medido una aceleración en producción.
+
 ## 1.2.4 — 2026-09-28
 
 ### Optimización y Reproducción

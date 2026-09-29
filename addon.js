@@ -6,6 +6,7 @@
  * NO hace scraping ni DDL. Solo consulta la tabla public.torrents
  */
 
+const { waitUntil } = require('@vercel/functions');
 const { addonBuilder } = require('stremio-addon-sdk');
 const { createClient } = require('@supabase/supabase-js');
 
@@ -14,9 +15,9 @@ const { createClient } = require('@supabase/supabase-js');
 // ---------------------------------------------------------------------------
 const manifest = {
   id: 'org.comunidad.torrents.espanol',
-  version: '1.2.4',
+  version: require('./package.json').version,
   name: 'Nexo Play',
-  description: 'Películas, series y anime en español e inglés. Encuentra opciones de reproducción con información de idioma y calidad, en un solo lugar.',
+  description: 'Películas, series y anime en español e inglés. Encuentra opciones de reproducción con información de idioma y calidad, en un solo lugar. Grupo de soporte: https://discord.com/invite/qEcdvvcA4',
   resources: ['stream'],
   types: ['movie', 'series', 'anime'],
   idPrefixes: ['tt'],
@@ -101,11 +102,17 @@ function isValidInfoHash(hash) {
   return typeof hash === 'string' && /^[a-fA-F0-9]{40}$/.test(hash.trim());
 }
 
-function extractInfoHashFromMagnet(magnetUrl) {
-  if (typeof magnetUrl !== 'string') return null;
+function parseMagnetUrl(value) {
   try {
-    const url = new URL(magnetUrl);
-    if (url.protocol !== 'magnet:') return null;
+    const url = value instanceof URL ? value : new URL(value);
+    return url.protocol === 'magnet:' ? url : null;
+  } catch (_) { return null; }
+}
+
+function extractInfoHashFromMagnet(magnetUrl) {
+  try {
+    const url = parseMagnetUrl(magnetUrl);
+    if (!url) return null;
     for (const xt of url.searchParams.getAll('xt')) {
       const hash = xt.replace(/^urn:btih:/i, '');
       if (hash === xt) continue;
@@ -122,10 +129,10 @@ function extractInfoHashFromMagnet(magnetUrl) {
 }
 
 function extractTrackersFromMagnet(magnetUrl) {
-  if (typeof magnetUrl !== 'string') return [];
+
   try {
-    const url = new URL(magnetUrl);
-    if (url.protocol !== 'magnet:') return [];
+    const url = parseMagnetUrl(magnetUrl);
+    if (!url) return [];
     return url.searchParams.getAll('tr')
       .map(tr => tr.trim())
       .filter(tr => /^(udp|https?):\/\//i.test(tr))
@@ -134,10 +141,10 @@ function extractTrackersFromMagnet(magnetUrl) {
 }
 
 function extractTitleFromMagnet(magnetUrl) {
-  if (typeof magnetUrl !== 'string') return null;
+
   try {
-    const url = new URL(magnetUrl);
-    if (url.protocol !== 'magnet:') return null;
+    const url = parseMagnetUrl(magnetUrl);
+    if (!url) return null;
     const dn = url.searchParams.get('dn');
     return dn && dn.trim() ? dn.trim() : null;
   } catch (_) { /* magnet malformado */ return null; }
@@ -214,7 +221,7 @@ function getLanguageTag(row) {
 
 function getResolutionTag(row) {
   const str = [row.resolution, row.quality, row.release_name, row.title, row.name].filter(Boolean).join(' ').toLowerCase();
-  if (str.includes('2160') || str.includes('4k') || str.includes('uhd')) return '4K';
+  if (str.includes('2160') || /\b4k\b/.test(str) || /\buhd\b/.test(str)) return '4K';
   if (str.includes('1080')) return '1080p';
   if (str.includes('720')) return '720p';
   if (str.includes('480')) return '480p';
@@ -224,7 +231,7 @@ function getResolutionTag(row) {
 // ---------------------------------------------------------------------------
 // 4. STREAM HANDLER - Lógica principal
 // ---------------------------------------------------------------------------
-async function streamHandler({ type, id }, clientFactory = getSupabaseClient) {
+async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClient) {
   const start = Date.now();
   console.log(`[Stream] → type=${type} id=${id}`);
 
@@ -291,7 +298,7 @@ async function streamHandler({ type, id }, clientFactory = getSupabaseClient) {
         let infoHash = row.info_hash || row.infoHash || row.hash || null;
         if (infoHash) infoHash = infoHash.toString().trim().toLowerCase();
 
-        const magnet = row.magnet_url || row.magnetUrl || row.magnet || null;
+        const magnet = parseMagnetUrl(row.magnet_url || row.magnetUrl || row.magnet);
         if (!isValidInfoHash(infoHash)) {
           // Intentar extraer de magnet
           const extracted = extractInfoHashFromMagnet(magnet);
@@ -312,9 +319,13 @@ async function streamHandler({ type, id }, clientFactory = getSupabaseClient) {
     // Mayor resolución -> Mejor compatibilidad de idioma -> Más seeders -> Mayor tamaño
     streamEntries.sort(compareStreamEntries);
 
-    const streams = streamEntries
-      .map(entry => entry.stream)
-      .filter((stream, index, all) => all.findIndex(item => item.infoHash === stream.infoHash && item.fileIdx === stream.fileIdx) === index);
+    const seen = new Set();
+    const streams = streamEntries.map(entry => entry.stream).filter(stream => {
+      const key = `${stream.infoHash}:${stream.fileIdx ?? ''}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 
     console.log(`[Stream] → Enviando ${streams.length} streams válidos`);
     return { streams, cacheMaxAge: 120, staleRevalidate: 600 };
@@ -324,7 +335,60 @@ async function streamHandler({ type, id }, clientFactory = getSupabaseClient) {
     return { streams: [] };
   }
 }
-builder.defineStreamHandler(streamHandler);
+// Cache por instancia con revalidación única y antigüedad máxima absoluta.
+function createCachedStreamHandler(handler, {
+  maxEntries = 250, now = Date.now, keepAlive = waitUntil, retryDelay = 15000
+} = {}) {
+  const cache = new Map();
+  const pending = new Map();
+  function refresh(key, args, previous) {
+    if (pending.has(key)) return pending.get(key);
+    const request = Promise.resolve().then(() => handler(args)).then(value => {
+      if (value.cacheMaxAge > 0) {
+        const expires = now() + value.cacheMaxAge * 1000;
+        // Los vacíos nunca se sirven obsoletos.
+        const staleSeconds = value.streams?.length ? Math.min(value.staleRevalidate || 0, 600) : 0;
+        cache.delete(key);
+        cache.set(key, { value: structuredClone(value), expires,
+          staleUntil: expires + staleSeconds * 1000, retryAt: 0 });
+        while (cache.size > maxEntries) cache.delete(cache.keys().next().value);
+      } else if (previous) previous.retryAt = now() + retryDelay;
+      return value;
+    }).catch(error => {
+      if (previous) previous.retryAt = now() + retryDelay;
+      throw error;
+    }).finally(() => {
+      if (pending.get(key) === request) pending.delete(key);
+    });
+    if (pending.size < maxEntries) pending.set(key, request);
+    return request;
+  }
+  return async function cached(args) {
+    const { imdbId, season, episode } = parseStremioId(args?.id);
+    if (!imdbId || !manifest.types.includes(args?.type) ||
+        (args.type === 'movie' ? season !== null : season === null || episode < 1)) return { streams: [] };
+    const key = `${args.type}:${imdbId}:${season}:${episode}`;
+    const hit = cache.get(key);
+    const time = now();
+    if (hit && hit.staleUntil > time) {
+      cache.delete(key);
+      cache.set(key, hit);
+      const value = structuredClone(hit.value);
+      // No reiniciar el TTL HTTP cada vez que se lee la caché local.
+      value.cacheMaxAge = Math.max(0, Math.floor((hit.expires - time) / 1000));
+      value.staleRevalidate = Math.max(0, Math.floor((hit.staleUntil - Math.max(time, hit.expires)) / 1000));
+      if (hit.expires <= time && hit.retryAt <= time && !pending.has(key) && pending.size < maxEntries) {
+        const background = refresh(key, args, hit).catch(() => {});
+        // Vercel mantiene viva la invocación después de enviar la respuesta.
+        keepAlive(background);
+      }
+      return value;
+    }
+    cache.delete(key);
+    return structuredClone(await refresh(key, args));
+  };
+}
+builder.defineStreamHandler(createCachedStreamHandler(streamHandler));
 
 // ---------------------------------------------------------------------------
 // Formateadores y comparadores de Stream
@@ -361,8 +425,9 @@ function compareStreamEntries(a, b) {
 }
 
 function buildStreamEntry(row, infoHash, magnetTrackers = [], imdbId = '', magnetTitle = null) {
-  const langTag = getLanguageTag(row);
-  const resolution = getResolutionTag(row);
+  const metadata = { ...row, name: row.name || magnetTitle };
+  const langTag = getLanguageTag(metadata);
+  const resolution = getResolutionTag(metadata);
   const sizeGB = formatSizeGB(row);
   const sizeBytes = parseSizeBytes(row);
   const seeders = row.seeders ?? row.seed ?? 0;
@@ -429,4 +494,4 @@ function buildStream(row, infoHash, magnetTrackers = [], imdbId = '') {
 const addonInterface = builder.getInterface();
 module.exports = addonInterface;
 
-module.exports.helpers = { parseStremioId, getLanguageTag, formatSizeGB, extractInfoHashFromMagnet, extractTrackersFromMagnet, streamHandler };
+module.exports.helpers = { parseStremioId, getLanguageTag, formatSizeGB, extractInfoHashFromMagnet, extractTrackersFromMagnet, streamHandler, createCachedStreamHandler };
