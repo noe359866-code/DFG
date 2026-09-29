@@ -1,10 +1,18 @@
-# Nexo Play · 1.2.6
+# Nexo Play · 1.3.0
 
 ![Nexo Play](public/assets/brand.png)
 
 **Tu próxima historia, más cerca.** Películas, series y anime en español e inglés. Encuentra opciones de reproducción con información de idioma y calidad, en un solo lugar.
 
 Complemento de fuentes de reproducción para Stremio. No incluye un catálogo propio; las opciones aparecen en las fichas compatibles. Idiomas, calidad y disponibilidad dependen de los archivos disponibles. Utiliza únicamente contenido que tengas derecho a reproducir.
+
+## Novedades de 1.3.0
+
+- El complemento se despliega ahora en **Cloudflare Workers**: `worker.js` es la única capa HTTP (manifiesto, streams, salud y estáticos) sobre la API Fetch, sin Express ni adaptadores de Vercel.
+- Los archivos de `public/` los sirve Workers Static Assets desde el edge sin invocar el Worker, con las cabeceras de `public/_headers` (`/assets/` anuncia un día de caché).
+- Caché del edge con la Cache API de Cloudflare: el manifiesto cinco minutos con `stale-while-revalidate` de una hora y los streams con resultados según su `cacheMaxAge`; los fallos siguen en `no-store`.
+- `ctx.waitUntil` mantiene la actualización de fuentes en segundo plano tras responder (antes `waitUntil` de Vercel). La compresión la negocia el propio edge de Cloudflare.
+- La configuración secreta va en secrets de Workers (`wrangler secret put`) y, en local, en `.dev.vars`; `npm start` sigue ofreciendo el servidor de Node en el puerto 7000.
 
 ## Novedades de 1.2.6
 
@@ -13,7 +21,7 @@ Complemento de fuentes de reproducción para Stremio. No incluye un catálogo pr
 - Compresión HTTP negociada (gzip/deflate) para reducir bytes transferidos, con compatibilidad para clientes sin compresión.
 - Cada magnet se analiza una vez por fila. La caché HTTP recibe el tiempo de vida restante, no un plazo nuevo en cada lectura.
 
-En Vercel, `waitUntil` mantiene activa la actualización después de responder. La caché sigue siendo por instancia y se pierde con reinicios; una instancia nueva o un título nunca consultado debe esperar a la base de datos. Las consultas mantienen su límite de ocho segundos. No se hacen consultas anticipadas a episodios que el usuario no solicitó.
+En Cloudflare Workers, `ctx.waitUntil` mantiene activa la actualización después de responder. La caché sigue siendo por instancia y se pierde con reinicios; una instancia nueva o un título nunca consultado debe esperar a la base de datos. Las consultas mantienen su límite de ocho segundos. No se hacen consultas anticipadas a episodios que el usuario no solicitó.
 
 Ejecuta `npm run benchmark` para una medición **simulada** de consultas concurrentes, caché y compresión; no representa latencias de producción ni velocidad de reproducción P2P.
 
@@ -44,7 +52,19 @@ cp .env.example .env
 npm start
 ```
 
-El servidor escucha en `0.0.0.0:7000` (configurable con `PORT`). En Vercel, configura las variables de entorno en el proyecto y despliega con `vercel.json`. Local y serverless utilizan la misma aplicación HTTP.
+El servidor local escucha en `0.0.0.0:7000` (configurable con `PORT`) y ejecuta el mismo manejador Fetch del Worker adaptado a Node.
+
+Para desarrollar y desplegar en Cloudflare Workers:
+
+```sh
+cp .dev.vars.example .dev.vars
+# Completa SUPABASE_URL / SUPABASE_ANON_KEY en .dev.vars
+npm run dev        # wrangler dev en http://localhost:8787
+npm run deploy     # wrangler deploy (requiere wrangler login)
+npm run tail       # registros en vivo del Worker desplegado
+```
+
+En producción, los secretos no van en `wrangler.toml`: usa `npx wrangler secret put SUPABASE_URL` (y `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY`). El empaquetado se puede validar sin desplegar con `npx wrangler deploy --dry-run`.
 
 ```sh
 npm test
@@ -70,11 +90,12 @@ Los magnets admiten BTIH hexadecimal o base32; las filas sin hash válido se des
 ## Estructura
 
 - `addon.js`: manifiesto, validación, consulta y formato de streams.
-- `app.js`: rutas HTTP compartidas, CORS, imagen y manifiesto público.
-- `server.js`: arranque local.
-- `api/index.js`: adaptación de reescrituras de Vercel.
-- `public/`: página de instalación e imagen de marca generada con IA. `index.html` y `assets/` son archivos estáticos: Vercel los sirve desde su CDN sin invocar la función, y `/assets/` anuncia un día de caché.
-- `test/`: pruebas unitarias y HTTP con datos simulados.
+- `worker.js`: rutas sobre la API Fetch (manifiesto, streams, salud, estáticos), CORS y caché del edge con la Cache API.
+- `worker.mjs`: punto de entrada ESM que expone el manejador a Wrangler.
+- `server.js`: adaptador local del mismo manejador al servidor HTTP de Node.
+- `wrangler.toml`: configuración del Worker y binding de estáticos.
+- `public/`: página de instalación e imagen de marca generada con IA. `index.html` y `assets/` son archivos estáticos: Workers Static Assets los sirve desde el edge sin invocar el Worker, `/assets/` anuncia un día de caché y `public/_headers` declara esas cabeceras.
+- `test/`: pruebas unitarias y HTTP con datos simulados, incluida la caché del edge.
 
 La imagen se sirve desde el propio despliegue; no depende de un proveedor externo. El manifiesto HTTP incluye su URL absoluta. Las versiones fijadas mediante `overrides` corrigen dependencias transitivas del SDK sin degradarlo a una versión incompatible.
 

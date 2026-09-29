@@ -1,5 +1,21 @@
 # Historial de cambios
 
+## 1.3.0 — 2026-09-29
+
+**Migración a Cloudflare Workers:** el complemento se despliega ahora en Workers; desaparecen Vercel, Express y los adaptadores de reescritura. Las respuestas y la lógica del addon no cambian.
+
+- `worker.js` sustituye a la aplicación Express: mismas rutas (`/manifest.json`, `/stream/:type/:id.json`, `/health`, portada e imagen) sobre la API Fetch, con el mismo CORS, los mismos códigos y las mismas directivas de caché.
+- `worker.mjs` es el punto de entrada ESM para Wrangler; `server.js` adapta ese mismo manejador al servidor HTTP de Node para `npm start`.
+- `ctx.waitUntil` mantiene la actualización en segundo plano tras responder (antes `waitUntil` de `@vercel/functions`); el handler de streams acepta el keep-alive por llamada y conserva la misma caché en memoria.
+- Workers Static Assets sirve `public/` desde el edge sin invocar el Worker y `public/_headers` declara un día de caché para `/assets/` más las cabeceras CORS; los archivos ausentes siguen cayendo a un 404 en JSON sin caché.
+- Caché del edge con la Cache API de Cloudflare: el manifiesto cinco minutos con `stale-while-revalidate` de una hora y los streams con resultados según su `cacheMaxAge`; solo se almacena `GET` con `200` y `s-maxage` explícito, los fallos y `/health` siguen en `no-store`, y un `Cache-Control: no-store` del cliente obliga a regenerar.
+- El manifiesto solo recibe `logo`/`icon` absolutos a partir del origen de la petición validado, nunca de cabeceras del cliente.
+- La compresión la negocia el edge de Cloudflare; se retira el middleware gzip local y su prueba.
+- El SDK de Stremio se importa por su módulo `builder` (valida el manifiesto igual que antes); se eliminan del bundle Express, `@vercel/functions` y `ws`, imprescindibles hasta ahora solo en Vercel/Node antiguos.
+- Secretos con `npx wrangler secret put` en producción y `.dev.vars` en local; `wrangler.toml` fija `nodejs_compat` y el binding `ASSETS`. Nuevas pruebas de la Cache API, de `ctx.waitUntil` y de la configuración de Supabase desde el entorno del Worker.
+
+No modifica la base de datos, el manifiesto público más allá de la versión ni garantiza mayor velocidad de descarga P2P.
+
 ## 1.2.6 — 2026-09-28
 
 **Entrega de fuentes más ágil a Stremio:** respuestas comprimidas, actualización de fuentes recientes sin bloquear la entrega y mayor resistencia a fallos temporales de la base de datos.

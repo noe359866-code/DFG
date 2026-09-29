@@ -1,0 +1,8 @@
+# Copia este archivo a .dev.vars (se lee con `npm run dev` / wrangler dev).
+# En producción usa `npx wrangler secret put <NOMBRE>`; nunca publiques .dev.vars.
+
+# Supabase - Obtén estas claves en: https://supabase.com/dashboard/project/_/settings/api
+SUPABASE_URL=https://xxxxxxxx.supabase.co
+# Preferir ANON con RLS de lectura. SERVICE_ROLE solo en servidor, si es necesario.
+SUPABASE_ANON_KEY=tu_clave_anon
+# SUPABASE_SERVICE_ROLE_KEY=tu_clave_privada

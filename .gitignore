@@ -1,6 +1,7 @@
 node_modules
 .env
-.vercel
+.dev.vars
+.wrangler
 dist
 .DS_Store
 npm-debug.log
@@ -9,7 +10,6 @@ npm-debug.log
 .turbo
 .coverage
 .nyc_output
-.vercel
 .env.local
 .env.development.local
 .env.production.local

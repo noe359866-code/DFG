@@ -1,0 +1,13 @@
+# Despliegue en Cloudflare Workers. Los secretos NO van aquí: se configuran
+# con `npx wrangler secret put SUPABASE_URL` (y SUPABASE_ANON_KEY /
+# SUPABASE_SERVICE_ROLE_KEY) o en `.dev.vars` para `wrangler dev` local.
+name = "nexo-play"
+main = "worker.mjs"
+compatibility_date = "2026-09-29"
+compatibility_flags = ["nodejs_compat"]
+
+# Los estáticos de public/ se sirven desde el edge sin invocar el Worker y
+# respaldan sus cabeceras con public/_headers.
+[assets]
+directory = "./public"
+binding = "ASSETS"

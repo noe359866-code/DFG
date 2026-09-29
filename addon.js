@@ -1,13 +1,14 @@
 /**
  * Nexo Play - Stremio Addon
  * Lógica principal del addon: Manifest + Stream Handler
- * 
- * Diseñado para Vercel Serverless + Supabase (PostgreSQL)
+ *
+ * Diseñado para Cloudflare Workers + Supabase (PostgreSQL)
  * NO hace scraping ni DDL. Solo consulta la tabla public.torrents
  */
 
-const { waitUntil } = require('@vercel/functions');
-const { addonBuilder } = require('stremio-addon-sdk');
+// Solo el builder: el índice del SDK arrastra serveHTTP/Express, que no corre
+// en Workers. El enrutado vive en worker.js y la interfaz se construye abajo.
+const addonBuilder = require('stremio-addon-sdk/src/builder');
 const { createClient } = require('@supabase/supabase-js');
 
 // ---------------------------------------------------------------------------
@@ -40,38 +41,44 @@ const builder = new addonBuilder(manifest);
 // 2. SUPABASE CLIENT - Singleton con cache
 // ---------------------------------------------------------------------------
 let supabaseClient = null;
+// Variables del Worker (secrets/bindings de Cloudflare). En Node local se
+// complementan con process.env, que sigue siendo el respaldo.
+let envOverrides = null;
+
+function configure(overrides) {
+  const next = overrides && typeof overrides === 'object' ? {
+    SUPABASE_URL: overrides.SUPABASE_URL,
+    SUPABASE_ANON_KEY: overrides.SUPABASE_ANON_KEY,
+    SUPABASE_SERVICE_ROLE_KEY: overrides.SUPABASE_SERVICE_ROLE_KEY
+  } : null;
+  const changed = JSON.stringify(next) !== JSON.stringify(envOverrides);
+  envOverrides = next;
+  if (changed) supabaseClient = null;
+}
+
+function envValue(name) {
+  const value = envOverrides && envOverrides[name];
+  if (value) return value;
+  return typeof process !== 'undefined' && process.env ? process.env[name] : undefined;
+}
 
 function getSupabaseClient() {
   if (supabaseClient) return supabaseClient;
 
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+  const supabaseUrl = envValue('SUPABASE_URL');
+  const supabaseKey = envValue('SUPABASE_SERVICE_ROLE_KEY') || envValue('SUPABASE_ANON_KEY');
 
   if (!supabaseUrl || !supabaseKey) {
-    console.warn('[Addon] ⚠️ Faltan variables SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY');
+    console.warn('[Addon] ⚠️ Faltan variables SUPABASE_URL / SUPABASE_ANON_KEY');
     return null;
   }
 
   try {
-    // Node <22 necesita polyfill ws para el Realtime client de Supabase
-    // Aunque no usamos realtime, el SDK lo inicializa igual
-    let wsTransport = undefined;
-    try {
-      wsTransport = require('ws');
-    } catch (_) {
-      // ws no instalado - en Vercel con Node 22+ no es necesario
-    }
-
-    const options = {
+    // No se usa realtime; WebSocket global (Node 22 y Cloudflare Workers)
+    // cubre su inicialización sin dependencias adicionales.
+    supabaseClient = createClient(supabaseUrl, supabaseKey, {
       auth: { persistSession: false, autoRefreshToken: false }
-    };
-    // Solo inyectamos transport si existe (evita el throw en Node 20)
-    if (wsTransport) {
-      options.global = { fetch: global.fetch };
-      options.realtime = { transport: wsTransport };
-    }
-
-    supabaseClient = createClient(supabaseUrl, supabaseKey, options);
+    });
     return supabaseClient;
   } catch (err) {
     console.error('[Supabase] Error inicializando cliente:', err.message);
@@ -335,9 +342,14 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
     return { streams: [] };
   }
 }
+// Cumplimiento tras responder: en Cloudflare Workers la ruta pasa ctx.waitUntil
+// por llamada; fuera de Workers solo se evita el rechazo no manejado.
+function discardInBackground(task) {
+  Promise.resolve(task).catch(() => {});
+}
 // Cache por instancia con revalidación única y antigüedad máxima absoluta.
 function createCachedStreamHandler(handler, {
-  maxEntries = 250, now = Date.now, keepAlive = waitUntil, retryDelay = 15000
+  maxEntries = 250, now = Date.now, keepAlive = discardInBackground, retryDelay = 15000
 } = {}) {
   const cache = new Map();
   const pending = new Map();
@@ -363,7 +375,7 @@ function createCachedStreamHandler(handler, {
     if (pending.size < maxEntries) pending.set(key, request);
     return request;
   }
-  return async function cached(args) {
+  return async function cached(args, requestKeepAlive = keepAlive) {
     const { imdbId, season, episode } = parseStremioId(args?.id);
     if (!imdbId || !manifest.types.includes(args?.type) ||
         (args.type === 'movie' ? season !== null : season === null || episode < 1)) return { streams: [] };
@@ -379,8 +391,9 @@ function createCachedStreamHandler(handler, {
       value.staleRevalidate = Math.max(0, Math.floor((hit.staleUntil - Math.max(time, hit.expires)) / 1000));
       if (hit.expires <= time && hit.retryAt <= time && !pending.has(key) && pending.size < maxEntries) {
         const background = refresh(key, args, hit).catch(() => {});
-        // Vercel mantiene viva la invocación después de enviar la respuesta.
-        keepAlive(background);
+        // El Worker mantiene vivo el isolate después de enviar la respuesta
+        // con ctx.waitUntil; en local el trabajo sigue su curso normal.
+        requestKeepAlive(background);
       }
       return value;
     }
@@ -388,7 +401,9 @@ function createCachedStreamHandler(handler, {
     return structuredClone(await refresh(key, args));
   };
 }
-builder.defineStreamHandler(createCachedStreamHandler(streamHandler));
+// Singleton compartido: la interfaz del SDK y el Worker usan la misma caché.
+const cachedStreamHandler = createCachedStreamHandler(streamHandler);
+builder.defineStreamHandler(cachedStreamHandler);
 
 // ---------------------------------------------------------------------------
 // Formateadores y comparadores de Stream
@@ -494,4 +509,4 @@ function buildStream(row, infoHash, magnetTrackers = [], imdbId = '') {
 const addonInterface = builder.getInterface();
 module.exports = addonInterface;
 
-module.exports.helpers = { parseStremioId, getLanguageTag, formatSizeGB, extractInfoHashFromMagnet, extractTrackersFromMagnet, streamHandler, createCachedStreamHandler };
+module.exports.helpers = { parseStremioId, getLanguageTag, formatSizeGB, extractInfoHashFromMagnet, extractTrackersFromMagnet, streamHandler, createCachedStreamHandler, cachedStreamHandler, getSupabaseClient, configure };
