@@ -1,5 +1,17 @@
 # Historial de cambios
 
+## 1.4.0 — 2026-09-29
+
+**Más contenido visible y despliegues a prueba de errores de configuración:** series que antes respondían vacío ofrecen ahora el pack de su temporada, los cortes de red puntuales se reintentan al instante y las variables de entorno se sanean y diagnostican solas.
+
+- **Fallback a packs de temporada:** si una serie/anime no tiene el episodio exacto en la base, se consultan los packs de temporada completa (`episode` NULL) y se ofrecen etiquetados como `PACK T<temporada>` en el nombre, con una línea informativa en la descripción. Las películas nunca disparan esta segunda consulta.
+- **Reintento de errores transitorios:** cada consulta a la base reintenta una vez (pausa de 300 ms) ante cortes de red, timeouts y 502/503/504. Los errores permanentes (JWT inválido, RLS, sintaxis) no se reintentan para no duplicar la espera; cada intento conserva su límite de ocho segundos y se registra su duración.
+- **Entorno a prueba de copiar y pegar:** los valores de `SUPABASE_URL` y las claves se recortan de espacios, saltos de línea y comillas envolventes; los placeholders de `.env.example` / `.dev.vars.example` (`tu_clave_anon`, `xxxxxxxx…`) se descartan en vez de intentar conectar. La URL acepta pegarse sin `https://` o con barra final y se valida antes de crear el cliente.
+- **`/health` con diagnóstico:** además de `status` y `version`, informa de `supabase.configured`, `supabase.url` (`ok` / `invalid` / `missing`) y `supabase.keyType` (`anon` / `service_role` / `none`), sin exponer jamás los valores. El aviso de configuración incompleta indica ahora exactamente qué variable falta o es inválida.
+- Nuevas pruebas de saneamiento de entorno, normalización de URL, prioridad de `SERVICE_ROLE`, reintento transitorio único, no reintento de errores permanentes y fallback de packs (incluido que las películas nunca lo consultan) y del diagnóstico de `/health`.
+
+No modifica la base de datos, el manifiesto público más allá de la versión ni garantiza mayor velocidad de descarga P2P.
+
 ## 1.3.0 — 2026-09-29
 
 **Migración a Cloudflare Workers:** el complemento se despliega ahora en Workers; desaparecen Vercel, Express y los adaptadores de reescritura. Las respuestas y la lógica del addon no cambian.

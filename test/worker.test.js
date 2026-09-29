@@ -142,9 +142,13 @@ test('health never announces cache and the worker configures Supabase from env',
   const health = await fetchWorker('/health');
   assert.equal(health.status, 200);
   assert.equal(health.headers.get('cache-control'), 'no-store');
-  assert.equal((await health.json()).version, addon.manifest.version);
+  const bare = await health.json();
+  assert.equal(bare.version, addon.manifest.version);
+  assert.deepEqual(bare.supabase, { configured: false, url: 'missing', keyType: 'none' },
+    '/health diagnostica las variables sin exponer sus valores');
 
-  await fetchWorker('/health', { env: { SUPABASE_URL: 'https://example.supabase.co', SUPABASE_ANON_KEY: 'anon' } });
+  const injected = await fetchWorker('/health', { env: { SUPABASE_URL: 'https://example.supabase.co', SUPABASE_ANON_KEY: 'anon' } });
+  assert.deepEqual((await injected.json()).supabase, { configured: true, url: 'ok', keyType: 'anon' });
   const client = addon.helpers.getSupabaseClient();
   assert.ok(client, 'el Worker inyecta los secretos en el cliente de Supabase');
   assert.equal(client.supabaseUrl, 'https://example.supabase.co');
