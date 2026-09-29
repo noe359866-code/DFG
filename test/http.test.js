@@ -10,8 +10,18 @@ test('routes, image, CORS, methods and safe landing', async t => {
   const base = `http://127.0.0.1:${server.address().port}`;
   const get = (path, options) => fetch(base + path, options);
   const manifestResponse = await get('/manifest.json');
-  assert.equal(manifestResponse.headers.get('cache-control'), 'public, s-maxage=300, stale-while-revalidate=3600');
+  assert.equal(manifestResponse.headers.get('cache-control'), 'public, max-age=300, s-maxage=300, stale-while-revalidate=3600, stale-if-error=3600');
   assert.equal(manifestResponse.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal(manifestResponse.headers.get('strict-transport-security'), null, 'sin HSTS en peticiones locales por HTTP');
+  const etag = manifestResponse.headers.get('etag');
+  assert.match(etag || '', /^"[0-9a-zA-Z+/=]+"$/, 'el manifiesto incluye un ETag fuerte');
+  const notModified = await get('/manifest.json', { headers: { 'if-none-match': etag } });
+  assert.equal(notModified.status, 304, 'If-None-Match coincide devuelve 304 sin cuerpo');
+  assert.equal(await notModified.text(), '');
+  assert.equal(notModified.headers.get('etag'), etag);
+  assert.equal(notModified.headers.get('access-control-allow-origin'), '*');
+  const staleEtag = await get('/manifest.json?variante=1', { headers: { 'if-none-match': '"otro"' } });
+  assert.equal(staleEtag.status, 200, 'un ETag distinto regenera la respuesta');
   const manifest = await (await get('/manifest.json')).json();
   assert.equal(manifest.version, '1.3.0');
   assert.deepEqual(manifest.stremioAddonsConfig, {
@@ -26,16 +36,20 @@ test('routes, image, CORS, methods and safe landing', async t => {
   assert.match(landing, /href="https:\/\/discord\.gg\/qEcdvvcA4" target="_blank" rel="noopener noreferrer"/, 'el canal de soporte de Discord debe estar en la portada');
   const image = await get('/assets/brand.png');
   assert.equal(image.headers.get('content-type'), 'image/png');
-  assert.equal(image.headers.get('cache-control'), 'public, max-age=86400');
+  assert.equal(image.headers.get('cache-control'), 'public, max-age=86400, stale-while-revalidate=604800');
   assert.equal(image.headers.get('access-control-allow-origin'), '*');
   assert.equal((await get('/health')).status, 200);
-  assert.equal((await get('/health-anything')).status, 404);
+  const missing = await get('/health-anything');
+  assert.equal(missing.status, 404);
+  assert.equal(missing.headers.get('cache-control'), 'no-store', 'los 404 no se cachean por heurística');
   const options = await get('/manifest.json', { method: 'OPTIONS' });
   assert.equal(options.status, 204);
   assert.equal(options.headers.get('access-control-allow-origin'), '*');
+  assert.equal(options.headers.get('access-control-max-age'), '86400', 'el preflight se memoriza un día');
   const post = await get('/manifest.json', { method: 'POST' });
   assert.equal(post.status, 405);
   assert.equal(post.headers.get('allow'), 'GET, HEAD, OPTIONS');
+  assert.equal(post.headers.get('cache-control'), 'no-store');
   const head = await get('/manifest.json', { method: 'HEAD' });
   assert.equal(head.status, 200);
   assert.equal(await head.text(), '', 'HEAD no lleva cuerpo');
@@ -54,6 +68,10 @@ test('landing version matches the manifest version', async t => {
 });
 test('stream cache control mirrors the handler result for the edge', () => {
   const { streamCacheControl } = require('../worker');
+  assert.equal(
+    streamCacheControl({ streams: [{ infoHash: 'a'.repeat(40) }], cacheMaxAge: 120, staleRevalidate: 600, staleError: 600 }),
+    's-maxage=120, max-age=120, stale-while-revalidate=600, stale-if-error=600, public'
+  );
   assert.equal(
     streamCacheControl({ streams: [{ infoHash: 'a'.repeat(40) }], cacheMaxAge: 120, staleRevalidate: 600 }),
     's-maxage=120, max-age=120, stale-while-revalidate=600, public'

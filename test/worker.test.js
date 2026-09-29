@@ -38,14 +38,25 @@ test('manifest is served from the edge cache after the first miss', async t => {
 
   const first = await fetchWorker('/manifest.json', { ctx });
   assert.equal(first.status, 200);
-  assert.equal(first.headers.get('cache-control'), 'public, s-maxage=300, stale-while-revalidate=3600');
+  const expectedCache = 'public, max-age=300, s-maxage=300, stale-while-revalidate=3600, stale-if-error=3600';
+  assert.equal(first.headers.get('cache-control'), expectedCache);
+  assert.equal(first.headers.get('strict-transport-security'), 'max-age=31536000', 'HTTPS añade HSTS');
+  const etag = first.headers.get('etag');
+  assert.match(etag || '', /^"/, 'el manifiesto incluye ETag');
   await Promise.all(tasks);
   assert.equal(caches.puts, 1, 'la respuesta cacheable se guarda en la Cache API');
 
-  const second = await fetchWorker('/manifest.json', { ctx });
-  assert.equal(caches.puts, 1, 'el segundo miss no vuelve a invocar la generación');
-  assert.equal(second.headers.get('cache-control'), 'public, s-maxage=300, stale-while-revalidate=3600');
+  const second = await fetchWorker('/manifest.json?utm=irrelevante', { ctx });
+  assert.equal(caches.puts, 1, 'la clave de caché ignora la cadena de consulta');
+  assert.equal(second.headers.get('cache-control'), expectedCache);
   assert.equal((await second.json()).id, addon.manifest.id);
+
+  const notModified = await fetchWorker('/manifest.json?otra=variante', {
+    ctx, init: { headers: { 'if-none-match': etag } }
+  });
+  assert.equal(notModified.status, 304, 'el 304 funciona también desde la caché del edge');
+  assert.equal(notModified.headers.get('etag'), etag);
+  assert.equal(caches.puts, 1, 'un 304 no vuelve a guardar nada');
 });
 
 test('stream success announces edge cache, waits on ctx and is stored once', async t => {
@@ -56,7 +67,7 @@ test('stream success announces edge cache, waits on ctx and is stored once', asy
   addon.helpers.cachedStreamHandler = async () => {
     calls++;
     return { streams: [{ infoHash: 'a'.repeat(40), name: 'Nexo Play\n[ESP] 1080p', title: 'Título' }],
-      cacheMaxAge: 120, staleRevalidate: 600 };
+      cacheMaxAge: 120, staleRevalidate: 600, staleError: 600 };
   };
   t.after(() => {
     addon.helpers.cachedStreamHandler = original;
@@ -67,7 +78,7 @@ test('stream success announces edge cache, waits on ctx and is stored once', asy
 
   const first = await fetchWorker('/stream/movie/tt1234567.json', { ctx });
   assert.equal(first.status, 200);
-  assert.equal(first.headers.get('cache-control'), 's-maxage=120, max-age=120, stale-while-revalidate=600, public');
+  assert.equal(first.headers.get('cache-control'), 's-maxage=120, max-age=120, stale-while-revalidate=600, stale-if-error=600, public');
   const body = await first.json();
   assert.equal(body.streams.length, 1);
   assert.equal(body.cacheMaxAge, 120);
@@ -76,7 +87,7 @@ test('stream success announces edge cache, waits on ctx and is stored once', asy
 
   const second = await fetchWorker('/stream/movie/tt1234567.json', { ctx });
   assert.equal(calls, 1, 'el edge responde sin volver a llamar al handler');
-  assert.equal(second.headers.get('cache-control'), 's-maxage=120, max-age=120, stale-while-revalidate=600, public');
+  assert.equal(second.headers.get('cache-control'), 's-maxage=120, max-age=120, stale-while-revalidate=600, stale-if-error=600, public');
   assert.equal((await second.json()).streams.length, 1);
 });
 
@@ -121,7 +132,7 @@ test('static assets are served through the ASSETS binding with one day of cache'
   const image = await fetchWorker('/assets/brand.png', { env: { ASSETS: assets } });
   assert.equal(image.status, 200);
   assert.equal(image.headers.get('content-type'), 'image/png');
-  assert.equal(image.headers.get('cache-control'), 'public, max-age=86400');
+  assert.equal(image.headers.get('cache-control'), 'public, max-age=86400, stale-while-revalidate=604800');
   const missing = await fetchWorker('/assets/missing.png', { env: { ASSETS: assets } });
   assert.equal(missing.status, 404);
   assert.deepEqual(await missing.json(), { error: 'No encontrado' });

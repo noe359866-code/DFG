@@ -6,8 +6,16 @@ main = "worker.mjs"
 compatibility_date = "2026-09-29"
 compatibility_flags = ["nodejs_compat"]
 
+# Smart placement queda desactivado a propósito: el trabajo predomina en
+# contenido cacheado (manifiesto y streams) con una sola consulta saliente;
+# colocarse junto a Supabase solo añadiría ida y vuelta al visitante.
+
 # Los estáticos de public/ se sirven desde el edge sin invocar el Worker y
 # respaldan sus cabeceras con public/_headers.
 [assets]
 directory = "./public"
 binding = "ASSETS"
+
+# Registros en el panel de Cloudflare y en `npm run tail`.
+[observability]
+enabled = true

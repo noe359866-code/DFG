@@ -9,10 +9,11 @@ Complemento de fuentes de reproducción para Stremio. No incluye un catálogo pr
 ## Novedades de 1.3.0
 
 - El complemento se despliega ahora en **Cloudflare Workers**: `worker.js` es la única capa HTTP (manifiesto, streams, salud y estáticos) sobre la API Fetch, sin Express ni adaptadores de Vercel.
-- Los archivos de `public/` los sirve Workers Static Assets desde el edge sin invocar el Worker, con las cabeceras de `public/_headers` (`/assets/` anuncia un día de caché).
-- Caché del edge con la Cache API de Cloudflare: el manifiesto cinco minutos con `stale-while-revalidate` de una hora y los streams con resultados según su `cacheMaxAge`; los fallos siguen en `no-store`.
-- `ctx.waitUntil` mantiene la actualización de fuentes en segundo plano tras responder (antes `waitUntil` de Vercel). La compresión la negocia el propio edge de Cloudflare.
-- La configuración secreta va en secrets de Workers (`wrangler secret put`) y, en local, en `.dev.vars`; `npm start` sigue ofreciendo el servidor de Node en el puerto 7000.
+- Los archivos de `public/` los sirve Workers Static Assets desde el edge sin invocar el Worker, con las cabeceras de `public/_headers` (`/assets/` anuncia un día de caché más una semana de `stale-while-revalidate`).
+- Caché del edge con la Cache API de Cloudflare: claves normalizadas sin cadena de consulta para no fragmentar la caché, manifiesto cinco minutos (`max-age` para navegadores y `s-maxage` para el edge) con `stale-while-revalidate` de una hora y `stale-if-error` en streams; los fallos siguen en `no-store`.
+- El manifiesto incluye **ETag**: los navegadores que repiten petición reciben `304 Not Modified` sin cuerpo. El preflight CORS se memoriza un día con `Access-Control-Max-Age`, y las respuestas HTTPS añaden HSTS.
+- `ctx.waitUntil` mantiene la actualización de fuentes en segundo plano tras responder (antes `waitUntil` de Vercel). Tras un fallo de la base de datos no se repite la consulta hasta quince segundos de cooldown, sin martillar la base durante caídas. La compresión la negocia el propio edge de Cloudflare.
+- La configuración secreta va en secrets de Workers (`wrangler secret put`) y, en local, en `.dev.vars` (también lo lee `npm start`); la observabilidad queda activada en el panel de Cloudflare y con `npm run tail`. `npm start` sigue ofreciendo el servidor de Node en el puerto 7000.
 
 ## Novedades de 1.2.6
 
@@ -85,7 +86,7 @@ La aplicación consulta `torrents` por `imdb_id`; para series/anime también exi
 
 Campos utilizados: `info_hash` (alternativas `infoHash`, `hash`) o `magnet_url` (`magnetUrl`, `magnet`), título, idioma/audio, resolución/calidad y tamaño. Opcionalmente `file_idx`/`fileIdx` indica el archivo del torrent. Los campos de metadatos ausentes se muestran como no indicados, sin inventar idioma, subtítulos ni calidad.
 
-Los magnets admiten BTIH hexadecimal o base32; las filas sin hash válido se descartan. Los trackers del magnet original (`tr=`) y los de la columna `trackers` viajan en `sources` de cada stream, normalizados y sin duplicados, para acelerar la búsqueda de pares. Las consultas tienen un límite de tiempo de ocho segundos. Además, cada instancia mantiene hasta 250 respuestas en memoria con 120 segundos de frescura y hasta 600 segundos adicionales para revalidar fuentes no vacías; agrupa consultas simultáneas idénticas. No se comparten entre instancias ni se almacenan errores. Los resultados con torrents anuncian 120 segundos de caché (navegador y edge) más diez minutos de `stale-while-revalidate`; los títulos sin torrents en la base se cachean sesenta segundos; los fallos no anuncian caché. `/health` comprueba que la aplicación responde, no la conectividad con la base de datos.
+Los magnets admiten BTIH hexadecimal o base32; las filas sin hash válido se descartan. Los trackers del magnet original (`tr=`) y los de la columna `trackers` viajan en `sources` de cada stream, normalizados y sin duplicados, para acelerar la búsqueda de pares. Las consultas tienen un límite de tiempo de ocho segundos. Además, cada instancia mantiene hasta 250 respuestas en memoria con 120 segundos de frescura y hasta 600 segundos adicionales para revalidar fuentes no vacías; agrupa consultas simultáneas idénticas. No se comparten entre instancias ni se almacenan errores: tras un fallo de la base de datos no se repite la consulta hasta pasados quince segundos, y las respuestas vacías confirmadas se cachean sesenta segundos. Los resultados con torrents anuncian 120 segundos de caché (navegador y edge) más diez minutos de `stale-while-revalidate` y `stale-if-error`; los fallos no anuncian caché. El manifiesto anuncia `max-age`/`s-maxage` de cinco minutos con `stale-while-revalidate` de una hora, sirve `304` con su ETag y cachea en el borde ignorando la cadena de consulta. `/health` comprueba que la aplicación responde, no la conectividad con la base de datos.
 
 ## Estructura
 

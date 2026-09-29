@@ -1,7 +1,7 @@
 # Cabeceras para los archivos servidos por Workers Static Assets (el Worker
 # aplica las mismas cabeceras en local y en las rutas dinámicas).
 /assets/*
-  Cache-Control: public, max-age=86400
+  Cache-Control: public, max-age=86400, stale-while-revalidate=604800
   Access-Control-Allow-Origin: *
   Access-Control-Allow-Headers: *
   Access-Control-Allow-Methods: GET, HEAD, OPTIONS

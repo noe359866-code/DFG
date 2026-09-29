@@ -335,7 +335,9 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
     });
 
     console.log(`[Stream] → Enviando ${streams.length} streams válidos`);
-    return { streams, cacheMaxAge: 120, staleRevalidate: 600 };
+    // stale-if-error: si una actualización falla en el borde o en el
+    // navegador, se conserva la última respuesta buena durante diez minutos.
+    return { streams, cacheMaxAge: 120, staleRevalidate: 600, staleError: 600 };
 
   } catch (err) {
     console.error('[Stream] Excepción no controlada:', err.message, err.stack?.slice(0, 500));
@@ -348,11 +350,20 @@ function discardInBackground(task) {
   Promise.resolve(task).catch(() => {});
 }
 // Cache por instancia con revalidación única y antigüedad máxima absoluta.
+// Tras un fallo de la base de datos no se repite la consulta hasta completar
+// el cooldown: los fallos no se cachean, pero tampoco martillan la base.
 function createCachedStreamHandler(handler, {
-  maxEntries = 250, now = Date.now, keepAlive = discardInBackground, retryDelay = 15000
+  maxEntries = 250, now = Date.now, keepAlive = discardInBackground, retryDelay = 15000,
+  failureCooldown
 } = {}) {
+  const cooldownMs = Number.isFinite(failureCooldown) ? failureCooldown : retryDelay;
   const cache = new Map();
   const pending = new Map();
+  const failureUntil = new Map();
+  function markFailure(key) {
+    failureUntil.set(key, now() + cooldownMs);
+    while (failureUntil.size > maxEntries) failureUntil.delete(failureUntil.keys().next().value);
+  }
   function refresh(key, args, previous) {
     if (pending.has(key)) return pending.get(key);
     const request = Promise.resolve().then(() => handler(args)).then(value => {
@@ -364,10 +375,15 @@ function createCachedStreamHandler(handler, {
         cache.set(key, { value: structuredClone(value), expires,
           staleUntil: expires + staleSeconds * 1000, retryAt: 0 });
         while (cache.size > maxEntries) cache.delete(cache.keys().next().value);
-      } else if (previous) previous.retryAt = now() + retryDelay;
+        failureUntil.delete(key);
+      } else {
+        if (previous) previous.retryAt = now() + retryDelay;
+        markFailure(key);
+      }
       return value;
     }).catch(error => {
       if (previous) previous.retryAt = now() + retryDelay;
+      markFailure(key);
       throw error;
     }).finally(() => {
       if (pending.get(key) === request) pending.delete(key);
@@ -389,6 +405,8 @@ function createCachedStreamHandler(handler, {
       // No reiniciar el TTL HTTP cada vez que se lee la caché local.
       value.cacheMaxAge = Math.max(0, Math.floor((hit.expires - time) / 1000));
       value.staleRevalidate = Math.max(0, Math.floor((hit.staleUntil - Math.max(time, hit.expires)) / 1000));
+      // stale-if-error del navegador termina junto con la ventana absoluta.
+      if (Number.isInteger(value.staleError)) value.staleError = value.staleRevalidate;
       if (hit.expires <= time && hit.retryAt <= time && !pending.has(key) && pending.size < maxEntries) {
         const background = refresh(key, args, hit).catch(() => {});
         // El Worker mantiene vivo el isolate después de enviar la respuesta
@@ -398,6 +416,13 @@ function createCachedStreamHandler(handler, {
       return value;
     }
     cache.delete(key);
+    // Entradas obsoletas ya caducadas sí se sirven arriba; aquí solo frenamos
+    // consultas nuevas mientras dure el cooldown de un fallo reciente.
+    const failedUntil = failureUntil.get(key);
+    if (failedUntil !== undefined) {
+      if (failedUntil > time) return { streams: [] };
+      failureUntil.delete(key);
+    }
     return structuredClone(await refresh(key, args));
   };
 }

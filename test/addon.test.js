@@ -132,15 +132,23 @@ test('cache bounded eviction, type isolation and failed-query retries', async ()
   await cached({ type: 'movie', id: 'invalid' });
   assert.equal(calls, 3);
   let failures = 0;
+  let failClock = 0;
   const failed = addon.helpers.createCachedStreamHandler(async () => {
     failures++;
     return { streams: [] };
-  });
+  }, { now: () => failClock });
+  assert.deepEqual(await failed({ type: 'movie', id: 'tt1234567' }), { streams: [] });
+  assert.deepEqual(await failed({ type: 'movie', id: 'tt1234567' }), { streams: [] });
+  assert.equal(failures, 1, 'un fallo reciente no vuelve a martillar la base de datos');
+  failClock += 15001;
   await failed({ type: 'movie', id: 'tt1234567' });
-  await failed({ type: 'movie', id: 'tt1234567' });
-  assert.equal(failures, 2);
-  const rejected = addon.helpers.createCachedStreamHandler(async () => { throw Error('offline'); });
-  for (let i = 0; i < 2; i++) await assert.rejects(rejected({ type: 'movie', id: 'tt1234567' }), /offline/);
+  assert.equal(failures, 2, 'expirado el cooldown se reintenta la consulta');
+  const rejected = addon.helpers.createCachedStreamHandler(async () => { throw Error('offline'); }, { now: () => failClock });
+  await assert.rejects(rejected({ type: 'movie', id: 'tt1234567' }), /offline/);
+  assert.deepEqual(await rejected({ type: 'movie', id: 'tt1234567' }), { streams: [] },
+    'durante el cooldown las excepciones se responden como lista vacía');
+  failClock += 15001;
+  await assert.rejects(rejected({ type: 'movie', id: 'tt1234567' }), /offline/);
 });
 
 test('stale streams return before refresh finishes; one background refresh and decreasing TTL', async () => {

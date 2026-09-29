@@ -85,6 +85,9 @@ function nodeListener(req, res) {
 
 if (require.main === module) {
   require('dotenv').config();
+  // Mismas claves que usa wrangler dev: .dev.vars completa lo que falte en .env
+  // (dotenv no pisa valores ya definidos).
+  require('dotenv').config({ path: '.dev.vars' });
   http.createServer(nodeListener).listen(process.env.PORT || 7000, '0.0.0.0', () =>
     console.log(`Nexo Play ${require('./package.json').version} listo`));
 }

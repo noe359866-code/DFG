@@ -3,6 +3,11 @@
  * Única capa HTTP sobre la API Fetch: manifiesto, streams, salud y estáticos.
  * La lógica del addon (consulta y formato) vive en addon.js; aquí solo se
  * enruta, aplica CORS y administra la caché del edge con la Cache API.
+ *
+ * La Cache API honora s-maxage/max-age pero no stale-while-revalidate ni
+ * stale-if-error: esas ventanas viajan en la respuesta para el navegador,
+ * mientras que el frescura restante y la ventana obsoleta viven en la caché
+ * en memoria del isolate (addon.js).
  */
 
 const addon = require('./addon');
@@ -12,9 +17,13 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': '*',
   'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+  'Access-Control-Max-Age': '86400',
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer'
 };
+const HSTS = 'Strict-Transport-Security';
+const MANIFEST_CACHE_CONTROL = 'public, max-age=300, s-maxage=300, stale-while-revalidate=3600, stale-if-error=3600';
+const ASSET_CACHE_CONTROL = 'public, max-age=86400, stale-while-revalidate=604800';
 // /stream/:type/:id.json con segmento opcional :extra, como el router del SDK.
 const STREAM_ROUTE = /^\/stream\/([^/]+)\/([^/]+)(?:\/([^/]+))?\.json$/;
 
@@ -44,14 +53,14 @@ function decorate(response, extraHeaders) {
 function jsonResponse(body, status, extraHeaders) {
   return decorate(new Response(JSON.stringify(body), {
     status,
-    headers: { 'Content-Type': JSON_TYPE, ...extraHeaders }
+    headers: { 'Content-Type': JSON_TYPE, 'Cache-Control': 'no-store', ...extraHeaders }
   }));
 }
 
 /**
- * Cache-Control de una respuesta de streams, igual que antes:
- * el máximo del handler con su gemelo s-maxage para el edge, y no-store
- * cuando no hay directivas válidas (fallo de base de datos).
+ * Cache-Control de una respuesta de streams: el frescura restante con su
+ * gemelo s-maxage para el edge, las ventanas obsoletas para el navegador y
+ * no-store cuando el handler no dio directivas (fallo de base de datos).
  */
 function streamCacheControl(result) {
   if (!Number.isInteger(result.cacheMaxAge)) return 'no-store';
@@ -62,20 +71,36 @@ function streamCacheControl(result) {
   return parts.join(', ');
 }
 
-function manifestResponse(url) {
+async function computeEtag(body) {
+  const digest = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(body));
+  const bytes = new Uint8Array(digest);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return `"${btoa(binary)}"`;
+}
+
+function etagMatches(headerValue, etag) {
+  if (!etag || !headerValue) return false;
+  if (headerValue.trim() === '*') return true;
+  return headerValue.split(',').some(candidate => candidate.trim() === etag);
+}
+
+async function manifestResponse(url) {
   const proto = url.protocol.replace(/:$/, '');
   const host = url.host;
   // El origen solo se coloca en metadatos públicos si el host es válido;
   // nunca se inyectan cabeceras de la petición en la respuesta.
   const valid = /^[a-z0-9.-]+(?::\d{1,5})?$/i.test(host) && ['http', 'https'].includes(proto);
   const brand = `${proto}://${host}/assets/brand.png`;
-  return decorate(new Response(JSON.stringify({
+  const body = JSON.stringify({
     ...addon.manifest,
     ...(valid ? { logo: brand, icon: brand } : {})
-  }), {
+  });
+  return decorate(new Response(body, {
     headers: {
       'Content-Type': JSON_TYPE,
-      'Cache-Control': 'public, s-maxage=300, stale-while-revalidate=3600'
+      'Cache-Control': MANIFEST_CACHE_CONTROL,
+      'ETag': await computeEtag(body)
     }
   }));
 }
@@ -124,7 +149,7 @@ async function staticResponse(request, url, env) {
     const response = await env.ASSETS.fetch(request);
     // Un archivo ausente cae al 404 en JSON, como antes: sin caché implícita.
     if (!response.ok) return jsonResponse({ error: 'No encontrado' }, 404);
-    const cacheControl = url.pathname.startsWith('/assets/') ? 'public, max-age=86400' : undefined;
+    const cacheControl = url.pathname.startsWith('/assets/') ? ASSET_CACHE_CONTROL : undefined;
     return decorate(response, { 'Cache-Control': cacheControl });
   }
   // Sin binding de estáticos (pruebas directas): 404 en lugar de romper.
@@ -133,22 +158,25 @@ async function staticResponse(request, url, env) {
 
 /**
  * Caché del edge con la Cache API: solo GET, solo 200 y solo respuestas que
- * anuncian s-maxage explícito; los fallos y /health nunca se almacenan.
+ * anuncian s-maxage explícito; los fallos y /health nunca se almacenan. La
+ * clave ignora la cadena de consulta: los parámetros no cambian la respuesta
+ * y normalizarla evita fragmentar la caché por variaciones irrelevantes.
  */
-async function edgeCache(request, ctx, generate) {
+async function edgeCache(request, url, ctx, generate) {
   const store = typeof caches !== 'undefined' && caches ? caches.default : null;
   const cacheableMethod = request.method === 'GET';
   const bypass = /no-store/.test(request.headers.get('cache-control') || '');
-  if (store && cacheableMethod && !bypass) {
+  const key = cacheableMethod ? new Request(`${url.origin}${url.pathname}`) : null;
+  if (store && key && !bypass) {
     try {
-      const hit = await store.match(request);
+      const hit = await store.match(key);
       if (hit) return hit;
     } catch (_) { /* cache no disponible */ }
   }
   const response = await generate();
-  if (store && cacheableMethod && !bypass && response.status === 200 &&
+  if (store && key && !bypass && response.status === 200 &&
       /s-maxage=\d+/.test(response.headers.get('cache-control') || '')) {
-    keepAliveFor(ctx)(store.put(request, response.clone()));
+    keepAliveFor(ctx)(store.put(key, response.clone()));
   }
   return response;
 }
@@ -165,13 +193,26 @@ async function handleRequest(request, env = {}, ctx = undefined) {
 
     let response;
     if (url.pathname === '/manifest.json') {
-      response = await edgeCache(request, ctx, () => manifestResponse(url));
+      response = await edgeCache(request, url, ctx, () => manifestResponse(url));
+      // Validación condicional: mismas cabeceras, sin cuerpo, cuando el
+      // navegador ya tiene exactamente este manifiesto.
+      const ifNoneMatch = request.headers.get('if-none-match');
+      if (response.status === 200 && etagMatches(ifNoneMatch, response.headers.get('etag'))) {
+        response = new Response(null, {
+          status: 304,
+          headers: {
+            'ETag': response.headers.get('etag'),
+            'Cache-Control': response.headers.get('cache-control'),
+            ...CORS_HEADERS
+          }
+        });
+      }
     } else if (url.pathname === '/health') {
       response = healthResponse();
     } else {
       const streamMatch = STREAM_ROUTE.exec(url.pathname);
       if (streamMatch) {
-        response = await edgeCache(request, ctx, () => streamResponse(streamMatch, url, ctx));
+        response = await edgeCache(request, url, ctx, () => streamResponse(streamMatch, url, ctx));
       } else if (url.pathname === '/' || url.pathname.startsWith('/assets/')) {
         response = await staticResponse(request, url, env);
       } else {
@@ -179,6 +220,11 @@ async function handleRequest(request, env = {}, ctx = undefined) {
       }
     }
 
+    // Solo en HTTPS; las cabeceras procedentes de la caché son inmutables,
+    // así que decorate vuelve a envolver la respuesta.
+    if (url.protocol === 'https:') {
+      response = decorate(response, { [HSTS]: 'max-age=31536000' });
+    }
     if (request.method === 'HEAD') {
       return new Response(null, { status: response.status, statusText: response.statusText, headers: response.headers });
     }
