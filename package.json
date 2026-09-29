@@ -1,6 +1,6 @@
 {
   "name": "nexo-play-addon",
-  "version": "1.2.4",
+  "version": "1.2.6",
   "description": "Películas, series y anime en español e inglés para Stremio.",
   "main": "addon.js",
   "type": "commonjs",
@@ -12,7 +12,8 @@
     "dev": "vercel dev",
     "dev:local": "node server.js",
     "test:manifest": "node -e \"console.log(JSON.stringify(require('./addon').manifest, null, 2))\"",
-    "test": "node --test"
+    "test": "node --test",
+    "benchmark": "node scripts/benchmark.js"
   },
   "keywords": [
     "stremio",
@@ -27,6 +28,8 @@
   "license": "MIT",
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
+    "@vercel/functions": "^3.9.9",
+    "compression": "^1.8.2",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "stremio-addon-sdk": "^1.6.10",

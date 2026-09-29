@@ -1,10 +1,27 @@
-# Nexo Play · 1.2.4
+# Nexo Play · 1.2.6
 
 ![Nexo Play](public/assets/brand.png)
 
 **Tu próxima historia, más cerca.** Películas, series y anime en español e inglés. Encuentra opciones de reproducción con información de idioma y calidad, en un solo lugar.
 
 Complemento de fuentes de reproducción para Stremio. No incluye un catálogo propio; las opciones aparecen en las fichas compatibles. Idiomas, calidad y disponibilidad dependen de los archivos disponibles. Utiliza únicamente contenido que tengas derecho a reproducir.
+
+## Novedades de 1.2.6
+
+- Entrega inmediata de fuentes recientes desde memoria mientras una única consulta las actualiza. Tras sus 120 segundos de frescura, se pueden servir durante un máximo adicional de 600 segundos; los resultados vacíos no se sirven caducados.
+- Si una actualización falla, conserva las fuentes anteriores dentro de ese límite y espera 15 segundos antes del siguiente intento. No guarda el error como resultado.
+- Compresión HTTP negociada (gzip/deflate) para reducir bytes transferidos, con compatibilidad para clientes sin compresión.
+- Cada magnet se analiza una vez por fila. La caché HTTP recibe el tiempo de vida restante, no un plazo nuevo en cada lectura.
+
+En Vercel, `waitUntil` mantiene activa la actualización después de responder. La caché sigue siendo por instancia y se pierde con reinicios; una instancia nueva o un título nunca consultado debe esperar a la base de datos. Las consultas mantienen su límite de ocho segundos. No se hacen consultas anticipadas a episodios que el usuario no solicitó.
+
+Ejecuta `npm run benchmark` para una medición **simulada** de consultas concurrentes, caché y compresión; no representa latencias de producción ni velocidad de reproducción P2P.
+
+## Buscador incorporado en 1.2.5
+
+Nuevo buscador web de fuentes por **ID o enlace de IMDb**, con filtros de idioma y calidad. Selecciona película, serie o anime; para episodios indica temporada y número de episodio (temporada cero para especiales). Consulta fuentes sin salir de la página y reprodúcelas desde Stremio. No busca por nombre ni añade un catálogo propio.
+
+El parche reutiliza consultas recientes y simultáneas, elimina duplicados con menos trabajo y corrige metadatos obtenidos de enlaces magnet. No se promete una velocidad de reproducción: depende de la red y de los pares disponibles.
 
 ## Instalación
 
@@ -48,7 +65,7 @@ La aplicación consulta `torrents` por `imdb_id`; para series/anime también exi
 
 Campos utilizados: `info_hash` (alternativas `infoHash`, `hash`) o `magnet_url` (`magnetUrl`, `magnet`), título, idioma/audio, resolución/calidad y tamaño. Opcionalmente `file_idx`/`fileIdx` indica el archivo del torrent. Los campos de metadatos ausentes se muestran como no indicados, sin inventar idioma, subtítulos ni calidad.
 
-Los magnets admiten BTIH hexadecimal o base32; las filas sin hash válido se descartan. Los trackers del magnet original (`tr=`) y los de la columna `trackers` viajan en `sources` de cada stream, normalizados y sin duplicados, para acelerar la búsqueda de pares. Las consultas tienen un límite de tiempo de ocho segundos. Los resultados con torrents anuncian 120 segundos de caché (navegador y edge) más diez minutos de `stale-while-revalidate`; los títulos sin torrents en la base se cachean sesenta segundos; los fallos no anuncian caché. `/health` comprueba que la aplicación responde, no la conectividad con la base de datos.
+Los magnets admiten BTIH hexadecimal o base32; las filas sin hash válido se descartan. Los trackers del magnet original (`tr=`) y los de la columna `trackers` viajan en `sources` de cada stream, normalizados y sin duplicados, para acelerar la búsqueda de pares. Las consultas tienen un límite de tiempo de ocho segundos. Además, cada instancia mantiene hasta 250 respuestas en memoria con 120 segundos de frescura y hasta 600 segundos adicionales para revalidar fuentes no vacías; agrupa consultas simultáneas idénticas. No se comparten entre instancias ni se almacenan errores. Los resultados con torrents anuncian 120 segundos de caché (navegador y edge) más diez minutos de `stale-while-revalidate`; los títulos sin torrents en la base se cachean sesenta segundos; los fallos no anuncian caché. `/health` comprueba que la aplicación responde, no la conectividad con la base de datos.
 
 ## Estructura
 
