@@ -10,6 +10,12 @@ compatibility_flags = ["nodejs_compat"]
 # contenido cacheado (manifiesto y streams) con una sola consulta saliente;
 # colocarse junto a Supabase solo añadiría ida y vuelta al visitante.
 
+# Bloque exigido por `npx wrangler preview` (comando en beta que usa
+# Cloudflare Builds para las compilaciones de rama/PR). Puede ir vacío: los
+# assets y las opciones de compatibilidad siguen arriba y los Preview no
+# heredan vars ni bindings del nivel superior, así que aquí no hay secretos.
+[previews]
+
 # Los estáticos de public/ se sirven desde el edge sin invocar el Worker y
 # respaldan sus cabeceras con public/_headers.
 [assets]
