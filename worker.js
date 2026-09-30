@@ -141,10 +141,22 @@ async function streamResponse(match, url, ctx) {
 // /health confirma que el Worker responde y si las variables de Supabase son
 // válidas (sin exponer sus valores), para diagnosticar despliegues al instante.
 function healthResponse() {
+  const supabase = addon.helpers.configStatus();
+  let diagnostic;
+  if (supabase.url === 'missing') {
+    diagnostic = { code: 'SUPABASE_URL_MISSING', message: 'Define SUPABASE_URL en los secretos del despliegue.' };
+  } else if (supabase.url === 'invalid') {
+    diagnostic = { code: 'SUPABASE_URL_INVALID', message: 'SUPABASE_URL no tiene un formato válido; comprueba que incluya el host del proyecto.' };
+  } else if (supabase.keyType === 'none') {
+    diagnostic = { code: 'SUPABASE_KEY_MISSING', message: 'Define SUPABASE_ANON_KEY (o SUPABASE_SERVICE_ROLE_KEY si es imprescindible).' };
+  } else {
+    diagnostic = { code: 'CONFIG_PRESENT', message: 'La URL tiene formato válido y hay una clave; /health no comprueba la conexión ni los permisos de la base de datos.' };
+  }
   return decorate(new Response(JSON.stringify({
     status: 'ok',
     version: addon.manifest.version,
-    supabase: addon.helpers.configStatus()
+    supabase,
+    diagnostic
   }), {
     headers: { 'Content-Type': JSON_TYPE, 'Cache-Control': 'no-store' }
   }));

@@ -151,6 +151,24 @@ test('cache bounded eviction, type isolation and failed-query retries', async ()
   await assert.rejects(rejected({ type: 'movie', id: 'tt1234567' }), /offline/);
 });
 
+test('in-flight requests remain coalesced even when result cache capacity is full', async () => {
+  let calls = 0;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const cached = addon.helpers.createCachedStreamHandler(async () => {
+    calls++;
+    await gate;
+    return { streams: [], cacheMaxAge: 60 };
+  }, { maxEntries: 1 });
+  const first = cached({ type: 'movie', id: 'tt1234567' });
+  const other = cached({ type: 'movie', id: 'tt7654321' });
+  const duplicate = cached({ type: 'movie', id: 'tt1234567' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 2, 'solo hay una consulta activa por clave; capacidad de caché no la duplica');
+  release();
+  await Promise.all([first, other, duplicate]);
+});
+
 test('stale streams return before refresh finishes; one background refresh and decreasing TTL', async () => {
   let clock = 0;
   let calls = 0;
@@ -264,6 +282,16 @@ test('transient database errors are retried once; permanent ones are not', async
   const denied = await streamHandler({ type: 'movie', id: 'tt7654321' }, () => query);
   assert.equal(permanent, 1, 'los errores permanentes no duplican la espera');
   assert.deepEqual(denied, { streams: [] });
+
+  let rejectedAttempts = 0;
+  query.abortSignal = async () => {
+    rejectedAttempts++;
+    if (rejectedAttempts === 1) throw new TypeError('fetch failed');
+    return { data: [{ info_hash: hash, seeders: 2 }], error: null };
+  };
+  const recovered = await streamHandler({ type: 'movie', id: 'tt9876543' }, () => query);
+  assert.equal(rejectedAttempts, 2, 'también reintenta promesas rechazadas por fallos de red');
+  assert.equal(recovered.streams.length, 1);
 });
 
 test('series fall back to season packs when the exact episode is missing', async () => {
@@ -285,4 +313,17 @@ test('series fall back to season packs when the exact episode is missing', async
   const movies = await streamHandler({ type: 'movie', id: 'tt1234567' }, () => query);
   assert.deepEqual(movies, { streams: [], cacheMaxAge: 60 });
   assert.equal(usedIs.length, 0, 'las películas nunca consultan packs');
+
+  // Una fila del episodio sin hash no debe bloquear el fallback al pack.
+  usedIs.length = 0;
+  let queryNumber = 0;
+  query.abortSignal = async () => {
+    queryNumber++;
+    return queryNumber === 1
+      ? { data: [{ info_hash: 'inválido' }], error: null }
+      : { data: [{ info_hash: hash, title: 'Pack 720p', seeders: 8 }], error: null };
+  };
+  const repaired = await streamHandler({ type: 'series', id: 'tt1234567:2:5' }, () => query);
+  assert.equal(queryNumber, 2, 'una fila inválida activa la consulta de respaldo');
+  assert.match(repaired.streams[0].name, /PACK T2/);
 });
