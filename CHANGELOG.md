@@ -1,5 +1,21 @@
 # Historial de cambios
 
+## 1.5.0 — 2026-09-29
+
+**Mejora del procesado de datos:** las fuentes se eligen mejor, se detecta más información de cada fila y hay un tercer nivel de rescate para los episodios guardados con tipos raros.
+
+- **Orden de fuentes que empieza por la disponibilidad:** un torrent sin seeders baja por debajo de cualquier fuente sana, sea del tamaño que sea; antes un 4K muerto encabezaba la lista. Dentro de cada tramo se sigue decidiendo por resolución, idioma, seeders, leechers y tamaño, y el hash rompe el último empate para que dos peticiones idénticas devuelvan la misma lista.
+- **Más calidad detectada:** se reconocen 8K, 1440p, 576p, 360p y el entrelazado (`1080i`), con límites de palabra para que `14km` no se lea como 4K. Las resoluciones que la base declara sin altura reconocible (`WEBRip`, `HDTV`) conservan su texto, ya saneado, y pesan según la altura que digan.
+- **El idioma se lee también en el nombre del release:** si la columna de audio solo trae algo genérico como `Dolby Digital`, antes la fila quedaba como `N/D`; ahora se consulta el nombre, que es donde sí está el idioma. Aparecen además las etiquetas `VOST` (audio foreign con subs) y `SUB`, y `Latinoamérica`/`latam` se leen como `LAT`.
+- **Tamaños con una sola fuente de verdad:** el texto visible y `videoSize` salen del mismo cálculo, que acepta las tres columnas de la tabla, decimales con coma o punto y unidades de B a TB. Se distingue "tamaño cero" de "tamaño ausente": el cero se muestra y no se anuncia como pista de vídeo.
+- **Tercer nivel de rescate para episodios:** cuando ni el episodio exacto ni los packs devuelven nada, se relee la temporada y se coteja en memoria. Recupera las filas con `season`/`episode` como texto (`"2"`, `"05"`), que los filtros de la base no encuentran, y los packs con `episode` vacío en vez de `NULL`. El cotejo se hace siempre antes de ofrecer nada, así que no puede colarse un episodio equivocado.
+- **Texto de la base saneado:** se eliminan los caracteres de control, invisibles y bidi que rompen la ficha, y el texto se acota a 300 caracteres para que una fila corrupta no convierta la respuesta en un payload enorme. Los trackers sin host (`udp://`, `udp://:80/announce`) o desmedidos se descartan en vez de viajar al cliente.
+- **Más candidatos, misma respuesta:** la consulta trae hasta 50 filas en vez de 25, porque el orden final prioriza calidad y la base solo sabe ordenar por seeders; lo que sale al usuario se recorta aparte a 25 fuentes, ya deduplicadas por hash y archivo.
+- `bingeGroup` incluye la temporada (`nexo-play|<imdb>|s2|1080p-esp`), así la reproducción continua agrupa los episodios de una temporada sin mezclar otras. La ficha avisa cuando una fuente no tiene seeders.
+- Nuevas pruebas de las tres notaciones de tamaño, del idioma leído en el nombre del release, de las alturas nuevas, del saneado de texto, de los trackers sin host, del orden con fuentes muertas y desempates, del recorte a 25, del rescate en memoria y del `bingeGroup` por temporada.
+
+No modifica la base de datos, el manifiesto público más allá de la versión ni garantiza mayor velocidad de descarga P2P.
+
 ## 1.4.0 — 2026-09-29
 
 **Más contenido visible y despliegues a prueba de errores de configuración:** series que antes respondían vacío ofrecen ahora el pack de su temporada, los cortes de red puntuales se reintentan al instante y las variables de entorno se sanean y diagnostican solas.
