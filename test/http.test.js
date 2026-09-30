@@ -23,7 +23,7 @@ test('routes, image, CORS, methods and safe landing', async t => {
   const staleEtag = await get('/manifest.json?variante=1', { headers: { 'if-none-match': '"otro"' } });
   assert.equal(staleEtag.status, 200, 'un ETag distinto regenera la respuesta');
   const manifest = await (await get('/manifest.json')).json();
-  assert.equal(manifest.version, '1.4.0');
+  assert.equal(manifest.version, require('../package.json').version, 'el manifiesto publica la versión del paquete');
   assert.deepEqual(manifest.stremioAddonsConfig, {
     issuer: 'https://stremio-addons.net',
     signature: 'eyJhbGciOiJkaXIiLCJlbmMiOiJBMTI4Q0JDLUhTMjU2In0..g42ZuVG1dWzDRcFDdl2fSg.XTSmojbOIelhstXtRYc4quyFOTqqzzpM5A37XgsUCQFnXn0-CvOqL4-_cB0Ici9r4PKbof275NCBIoyHkfXYEcjZGKHnoEekJ06szsimbfujDbMlELhpntPJ-KR5uH0n.nl6gG0luYfRKGH23oOt-YQ'

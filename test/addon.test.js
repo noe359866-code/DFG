@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const addon = require('../addon');
-const { parseStremioId, getLanguageTag, formatSizeGB, extractInfoHashFromMagnet, extractTrackersFromMagnet, streamHandler } = addon.helpers;
+const { parseStremioId, getLanguageTag, getResolutionTag, formatSizeGB, parseSizeBytes, sanitizeOneLine, extractInfoHashFromMagnet, extractTrackersFromMagnet, streamHandler } = addon.helpers;
 const hash = 'a'.repeat(40);
 test('consistent release and private public description', () => {
   assert.equal(addon.manifest.version, require('../package.json').version);
@@ -326,4 +326,154 @@ test('series fall back to season packs when the exact episode is missing', async
   const repaired = await streamHandler({ type: 'series', id: 'tt1234567:2:5' }, () => query);
   assert.equal(queryNumber, 2, 'una fila inválida activa la consulta de respaldo');
   assert.match(repaired.streams[0].name, /PACK T2/);
+});
+
+// --- Procesado de datos (1.5.0) ---
+
+// Mock que encadena resultados: sirve para los tres niveles de fallback, que
+// consultan la base uno detrás de otro con la misma cadena de filtros.
+function sequenceMock(results) {
+  const calls = [];
+  const query = {};
+  for (const method of ['from', 'select', 'eq', 'is', 'order', 'limit']) {
+    query[method] = (...args) => { calls.push([method, ...args]); return query; };
+  }
+  let index = 0;
+  const counters = { queries: 0 };
+  query.abortSignal = async () => { counters.queries++; return results[Math.min(index++, results.length - 1)]; };
+  return { client: () => query, calls, counters };
+}
+
+const hexHash = n => n.toString(16).padStart(40, '0');
+
+test('sizes accept every column, unit and notation, and tell "zero" from "missing"', () => {
+  assert.equal(parseSizeBytes({ size: '1,5 GB' }), Math.round(1.5 * 1024 ** 3));
+  assert.equal(parseSizeBytes({ size: '700 MB' }), 700 * 1024 ** 2);
+  assert.equal(parseSizeBytes({ size: '1.2 TB' }), Math.round(1.2 * 1024 ** 4));
+  assert.equal(parseSizeBytes({ size: '2 GiB' }), 2 * 1024 ** 3);
+  assert.equal(parseSizeBytes({ size_gb: '3' }), 3 * 1024 ** 3);
+  assert.equal(parseSizeBytes({ size_bytes: 1024 }), 1024);
+  assert.equal(parseSizeBytes({ size: 1024 }), 1024, 'un size numérico son bytes');
+  assert.equal(parseSizeBytes({ size_bytes: 0 }), null, 'el cero no se anuncia como videoSize');
+  assert.equal(parseSizeBytes({ size: 'lo que sea' }), null);
+  assert.equal(parseSizeBytes({ size_bytes: -5 }), null, 'un tamaño negativo se descarta');
+  assert.equal(formatSizeGB({ size: '1.2 TB' }), '1228.80');
+  assert.equal(formatSizeGB({ size_bytes: 1073741824 }), '1.00');
+  assert.equal(formatSizeGB({ size: '' }), '—');
+  assert.equal(formatSizeGB({ size: 0 }), '0.00', 'un tamaño declarado en cero se muestra, no se oculta');
+});
+
+test('language falls back to the release name when the audio column says nothing', () => {
+  assert.equal(getLanguageTag({ audio: 'Dolby Digital', title: 'La Película 1080p Castellano' }), 'CAST',
+    'un audio genérico no debe tapar el idioma que sí declara el nombre');
+  assert.equal(getLanguageTag({ audio: 'Dolby Digital', title: 'Película 1080p Latinoamérica' }), 'LAT');
+  assert.equal(getLanguageTag({ title: 'Movie.2020.VOSTFR.1080p' }), 'VOST');
+  assert.equal(getLanguageTag({ title: 'Movie 2020 SUB 1080p' }), 'SUB');
+  assert.equal(getLanguageTag({ audio: 'Latino' }), 'LAT');
+  assert.equal(getLanguageTag({ audio: 'LAT' }), 'LAT', 'las abreviaturas sueltas también se leen');
+  assert.equal(getLanguageTag({ audio: 'English', title: 'Spanish story' }), 'ENG',
+    'la columna de audio sigue mandando sobre el nombre');
+  assert.equal(getLanguageTag({ audio: 'Dolby Digital', title: 'The Last Castle' }), 'N/D');
+});
+
+test('resolution covers the intermediate and top heights without false positives', () => {
+  assert.equal(getResolutionTag({ quality: 'WEB-DL 1440p' }), '1440p');
+  assert.equal(getResolutionTag({ title: 'Pelicula 8K' }), '8K');
+  assert.equal(getResolutionTag({ quality: '1080i' }), '1080p', 'interlazado y progresivo comparten bucket');
+  assert.equal(getResolutionTag({ title: '2160p HDR' }), '4K');
+  assert.equal(getResolutionTag({ title: '14km away' }), 'N/D', '"14km" no es 4K');
+  assert.equal(getResolutionTag({ quality: 'WEB-DL\nraro' }), 'WEB-DL raro',
+    'lo que declara la base se sanea antes de eventualar en el nombre');
+});
+
+test('text from the database is flattened, stripped of control characters and capped', () => {
+  assert.equal(sanitizeOneLine('a\u0000b\u200fc\td'), 'a b c d');
+  assert.equal(sanitizeOneLine(null), '');
+  assert.equal(sanitizeOneLine('x'.repeat(1000)).length, 300, 'el texto se acota para no inflar la respuesta');
+});
+
+test('trackers without a host are dropped instead of shipped to the client', () => {
+  const magnet = `magnet:?xt=urn:btih:${hash}&tr=udp://&tr=udp://:80/announce&tr=${'a'.repeat(300)}&tr=udp://tracker.example.org:1337`;
+  assert.deepEqual(extractTrackersFromMagnet(magnet), ['udp://tracker.example.org:1337']);
+});
+
+test('dead torrents sink below healthy ones whatever their quality', async () => {
+  const m = mock([
+    { info_hash: hexHash(1), title: 'Movie 4K', seeders: 0, audio: 'Spanish' },
+    { info_hash: hexHash(2), title: 'Movie 1080p', seeders: 3, audio: 'Spanish' },
+    { info_hash: hexHash(3), title: 'Movie 4K', seeders: 12, audio: 'Spanish' }
+  ]);
+  const result = await streamHandler({ type: 'movie', id: 'tt1234567' }, m.client);
+  assert.deepEqual(result.streams.map(s => s.infoHash), [hexHash(3), hexHash(2), hexHash(1)],
+    'primero las vivas (por calidad), y la 4K muerta al final');
+  assert.match(result.streams[2].title, /Sin seeders/, 'la ficha avisa de que no hay seeders');
+});
+
+test('ranking breaks ties on leechers and finishes on a stable hash order', async () => {
+  const rows = [
+    { info_hash: hexHash(9), title: 'Movie 1080p Español', seeders: 4, leechers: 8, audio: 'Spanish' },
+    { info_hash: hexHash(3), title: 'Movie 1080p Español', seeders: 4, leechers: 1, audio: 'Spanish' },
+    { info_hash: hexHash(5), title: 'Movie 1080p Español', seeders: 4, audio: 'Spanish' }
+  ];
+  const first = await streamHandler({ type: 'movie', id: 'tt1234567' }, mock(rows).client);
+  assert.deepEqual(first.streams.map(s => s.infoHash), [hexHash(3), hexHash(9), hexHash(5)],
+    'menos leechers primero y los desconocidos al final del tramo');
+  const second = await streamHandler({ type: 'movie', id: 'tt1234567' }, mock([...rows].reverse()).client);
+  assert.deepEqual(second.streams.map(s => s.infoHash), first.streams.map(s => s.infoHash),
+    'el mismo grupo de filas produce la misma lista en el mismo orden');
+});
+
+test('the response is capped even when the table offers many more sources', async () => {
+  const rows = Array.from({ length: 40 }, (_, i) => ({
+    info_hash: hexHash(i + 1), title: `Movie ${i} 1080p Español`, seeders: 40 - i, audio: 'Spanish'
+  }));
+  const result = await streamHandler({ type: 'movie', id: 'tt1234567' }, mock(rows).client);
+  assert.equal(result.streams.length, 25, 'se devuelven como mucho 25 fuentes por título');
+  assert.equal(result.streams[0].infoHash, hexHash(1), 'el recorte ocurre después de ordenar, no antes');
+});
+
+test('a season scan in memory recovers episodes stored as text', async () => {
+  const m = sequenceMock([
+    { data: [], error: null },
+    { data: [], error: null },
+    { data: [
+      { info_hash: hexHash(1), season: '2', episode: '05', title: 'Serie 1080p Español', seeders: 7 },
+      { info_hash: hexHash(2), season: '2', episode: 6, title: 'Otro 1080p Español', seeders: 30 },
+      { info_hash: hexHash(3), season: 1, episode: 5, title: 'Temporada previa 1080p Español', seeders: 40 }
+    ], error: null }
+  ]);
+  const result = await streamHandler({ type: 'series', id: 'tt1234567:2:5' }, m.client);
+  assert.equal(result.streams.length, 1, 'solo el episodio pedido de la temporada pedida');
+  assert.equal(result.streams[0].infoHash, hexHash(1), 'el episode "05" se coteja como 5');
+  assert.equal(m.calls.filter(c => c[0] === 'is').length, 1, 'los packs se intentaron antes de releer la temporada');
+  assert.match(result.streams[0].behaviorHints.bingeGroup, /\|s2\|/, 'el bingeGroup distingue la temporada');
+});
+
+test('the in-memory scan also finds packs whose episode is empty instead of NULL', async () => {
+  const m = sequenceMock([
+    { data: [], error: null },
+    { data: [], error: null },
+    { data: [{ info_hash: hexHash(4), season: 2, episode: '', title: 'Temporada completa 1080p Español', seeders: 12 }], error: null }
+  ]);
+  const result = await streamHandler({ type: 'series', id: 'tt1234567:2:9' }, m.client);
+  assert.equal(result.streams.length, 1);
+  assert.match(result.streams[0].name, /PACK T2/, 'un pack con episode vacío se etiqueta igual que uno con NULL');
+  assert.match(result.streams[0].title, /temporada 2 completa/);
+});
+
+test('the in-memory scan never runs when the exact episode already answered', async () => {
+  const m = sequenceMock([
+    { data: [{ info_hash: hexHash(7), title: 'Episodio 1080p Español', seeders: 5 }], error: null }
+  ]);
+  const result = await streamHandler({ type: 'anime', id: 'tt1234567:1:4' }, m.client);
+  assert.equal(result.streams.length, 1);
+  assert.equal(m.counters.queries, 1, 'ninguna consulta extra: el episodio exacto ya respondió');
+  assert.equal(m.calls.filter(c => c[0] === 'is').length, 0, 'no se buscan packs ni se relee la temporada');
+  assert.match(result.streams[0].behaviorHints.bingeGroup, /\|s1\|/);
+});
+
+test('movie binge groups do not invent a season', async () => {
+  const result = await streamHandler({ type: 'movie', id: 'tt1234567' },
+    mock([{ info_hash: hexHash(8), title: 'Movie 1080p', seeders: 2 }]).client);
+  assert.match(result.streams[0].behaviorHints.bingeGroup, /\|movie\|/);
 });

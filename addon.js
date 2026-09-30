@@ -182,8 +182,7 @@ function extractTrackersFromMagnet(magnetUrl) {
     const url = parseMagnetUrl(magnetUrl);
     if (!url) return [];
     return url.searchParams.getAll('tr')
-      .map(tr => tr.trim())
-      .filter(tr => /^(udp|https?):\/\//i.test(tr))
+      .filter(isUsableTracker)
       .slice(0, 10);
   } catch (_) { /* magnet malformado */ return []; }
 }
@@ -198,28 +197,65 @@ function extractTitleFromMagnet(magnetUrl) {
   } catch (_) { /* magnet malformado */ return null; }
 }
 
-function sanitizeOneLine(str) {
+// Los títulos vienen de una tabla ajena: se aplastan a una línea, se limpian
+// los caracteres de control y bidi que rompen la interfaz, y se acotan para
+// que una fila corrupta no convierta la respuesta en un payload enorme.
+const MAX_TEXT_LENGTH = 300;
+
+function sanitizeOneLine(str, maxLength = MAX_TEXT_LENGTH) {
   if (typeof str !== 'string') return '';
-  return str.replace(/[\r\n\t\f\v]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return str
+    // \r\n\t\f\v y el resto de controles, más los invisibles y bidi.
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/[\u00ad\u200b-\u200f\u2028\u2029\u2060\ufeff]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
 }
 
-function parseSizeBytes(row) {
-  for (const [val, mult] of [[row.size_bytes, 1], [row.size_gb, 1024 ** 3]]) {
-    if (val !== null && val !== undefined && val !== '' && Number.isFinite(Number(val)) && Number(val) > 0) {
-      return Math.round(Number(val) * mult);
-    }
+// ---------------------------------------------------------------------------
+// Tamaños: una sola fuente de verdad para el texto visible y para videoSize.
+// Acepta las tres columnas que conviven en la tabla (size_bytes, size_gb y el
+// size libre con unidades) y las tres notaciones habituales: entero en bytes,
+// decimal con coma y sufijo en inglés. Sin cambios en el formato publicado.
+// ---------------------------------------------------------------------------
+const SIZE_UNITS = {
+  b: 1, kb: 1024, kib: 1024,
+  mb: 1024 ** 2, mib: 1024 ** 2,
+  gb: 1024 ** 3, gib: 1024 ** 3,
+  tb: 1024 ** 4, tib: 1024 ** 4
+};
+const SIZE_PATTERN = /^(\d+(?:[.,]\d+)?)\s*(b|kb|kib|mb|mib|gb|gib|tb|tib)$/i;
+
+function toFiniteNumber(value) {
+  if (value === null || value === undefined || value === '' || typeof value === 'boolean') return null;
+  const number = Number(typeof value === 'string' ? value.trim() : value);
+  return Number.isFinite(number) ? number : null;
+}
+
+// Distingue "no hay tamaño" de "hay tamaño y es cero": el texto muestra 0.00
+// GB cuando la fila lo declara, y — cuando la columna está vacía o es basura.
+function resolveSize(row) {
+  for (const [value, factor] of [[row.size_bytes, 1], [row.size_gb, 1024 ** 3]]) {
+    const number = toFiniteNumber(value);
+    if (number !== null && number >= 0) return { bytes: number * factor, present: true };
   }
   if (row.size !== null && row.size !== undefined && row.size !== '') {
-    if (Number.isFinite(Number(row.size)) && Number(row.size) > 0) return Math.round(Number(row.size));
-    const match = typeof row.size === 'string' && /^(\d+(?:[.,]\d+)?)\s*(gib|gb|mib|mb|kib|kb)$/i.exec(row.size.trim());
+    const bare = toFiniteNumber(row.size);
+    if (bare !== null && bare >= 0) return { bytes: bare, present: true };
+    const match = typeof row.size === 'string' ? SIZE_PATTERN.exec(row.size.trim()) : null;
     if (match) {
-      const num = Number(match[1].replace(',', '.'));
-      const unit = match[2].toLowerCase();
-      const mult = unit.startsWith('g') ? 1024 ** 3 : unit.startsWith('m') ? 1024 ** 2 : 1024;
-      return Math.round(num * mult);
+      return { bytes: Number(match[1].replace(',', '.')) * SIZE_UNITS[match[2].toLowerCase()], present: true };
     }
   }
-  return null;
+  return { bytes: null, present: false };
+}
+
+// Bytes para behaviorHints.videoSize: solo cuando hay un tamaño real que
+// anunciarle a Stremio (el cero y los valores ausentes se omiten).
+function parseSizeBytes(row) {
+  const { bytes } = resolveSize(row);
+  return bytes !== null && bytes > 0 ? Math.round(bytes) : null;
 }
 
 const DEFAULT_TRACKERS = [
@@ -231,12 +267,25 @@ const DEFAULT_TRACKERS = [
   'udp://tracker.openbittorrent.com:6969/announce'
 ];
 
+// Un tracker solo sirve si es una URL udp/http(s) con host: "udp://", "udp://:80"
+// o una cadena sin:// no arrancan clientes y solo ocupan sitio en el stream.
+function isUsableTracker(value) {
+  if (typeof value !== 'string') return false;
+  const text = value.trim();
+  if (!text || text.length > 200) return false;
+  try {
+    const url = new URL(text);
+    if (!/^(udp|https?)$/i.test(url.protocol.replace(/:$/, '')) || !url.hostname) return false;
+    return /^[a-z0-9.-]+$/i.test(url.hostname);
+  } catch (_) { return false; }
+}
+
 function buildTrackers(dbTrackersRaw, magnetTrackers = []) {
   const dbTrackers = Array.isArray(dbTrackersRaw) ? dbTrackersRaw
     : (typeof dbTrackersRaw === 'string' && dbTrackersRaw.trim() ? [dbTrackersRaw] : []);
   const custom = [...magnetTrackers, ...dbTrackers]
     .map(tr => typeof tr === 'string' ? tr.trim() : '')
-    .filter(tr => /^(udp|https?):\/\//i.test(tr));
+    .filter(isUsableTracker);
   const candidateList = custom.length ? custom : DEFAULT_TRACKERS;
   return [...new Set(candidateList)]
     .slice(0, 10)
@@ -244,36 +293,74 @@ function buildTrackers(dbTrackersRaw, magnetTrackers = []) {
 }
 
 function formatSizeGB(row) {
-  for (const [value, divisor] of [[row.size_bytes, 1024 ** 3], [row.size_gb, 1], [row.size, 1024 ** 3]]) {
-    if (value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)) && Number(value) >= 0) return (Number(value) / divisor).toFixed(2);
-  }
-  const match = typeof row.size === 'string' && /^(\d+(?:[.,]\d+)?)\s*(gib|gb|mib|mb|kib|kb)$/i.exec(row.size.trim());
-  if (!match) return '—';
-  return (Number(match[1].replace(',', '.')) / (/^g/i.test(match[2]) ? 1 : /^m/i.test(match[2]) ? 1024 : 1024 ** 2)).toFixed(2);
+  const { bytes, present } = resolveSize(row);
+  return present ? (bytes / 1024 ** 3).toFixed(2) : '—';
+}
+
+// ---------------------------------------------------------------------------
+// Idioma y resolución
+// ---------------------------------------------------------------------------
+
+// Se consulta primero la columna que declara el audio y, si no dice nada, el
+// nombre del release: muchas filas traen audio genérico ("Dolby Digital") pero
+// su título sí declara el idioma. Antes solo se miraba la primera fuente y esas
+// filas quedaban como N/D.
+// ---------------------------------------------------------------------------
+const LANGUAGE_SOURCES = row => [
+  [row.audio, row.language, row.lang].filter(Boolean).join(' '),
+  row.release_name, row.title, row.name
+];
+
+function detectLanguageTag(text) {
+  if (typeof text !== 'string' || !text.trim()) return null;
+  const lower = text.toLowerCase();
+  const has = pattern => pattern.test(lower);
+  const spanish = has(/\b(es|esp|español|spanish|castellano|cast|latino|lat|latam|latinoamérica)\b/);
+  const english = has(/\b(en|eng|english|inglés|ingles)\b/);
+  if (has(/\b(dual|multi|dual-sub)\b/) || (spanish && english)) return 'DUAL';
+  if (has(/\b(vose|vos|subtitulado)\b/)) return 'VOSE';
+  // Audio foreign con subtítulos o subtítulos sampled: no es un idioma concreto.
+  if (has(/\b(vost|vostfr|vosto|vosteng)\b/)) return 'VOST';
+  if (has(/\b(sub|subt|subsample)\b/)) return 'SUB';
+  if (has(/\b(castellano|cast)\b/)) return 'CAST';
+  if (has(/\b(latino|lat|latam|latinoamérica)\b/)) return 'LAT';
+  if (spanish) return 'ESP';
+  if (english) return 'ENG';
+  return null;
 }
 
 function getLanguageTag(row) {
-  const metadata = [row.audio, row.language, row.lang].filter(Boolean).join(' ');
-  const text = (metadata || row.release_name || row.title || row.name || '').toLowerCase();
-  const has = pattern => pattern.test(text);
-  const spanish = has(/\b(es|esp|español|spanish|castellano|cast|latino|lat)\b/);
-  const english = has(/\b(en|eng|english|inglés|ingles)\b/);
-  if (has(/\b(dual|multi)\b/) || (spanish && english)) return 'DUAL';
-  if (has(/\b(vose|vos|subtitulado)\b/)) return 'VOSE';
-  if (has(/\b(castellano|cast)\b/)) return 'CAST';
-  if (has(/\b(latino|lat)\b/)) return 'LAT';
-  if (spanish) return 'ESP';
-  if (english) return 'ENG';
+  for (const source of LANGUAGE_SOURCES(row)) {
+    const tag = detectLanguageTag(source);
+    if (tag) return tag;
+  }
   return 'N/D';
 }
 
+// Reconoce alturas y etiquetas de marketing; los límites de palabra evitan que
+// un título como "14km" se lea como 4K. El orden es de mayor a menor porque el
+// primero que casa es el que manda ("2160p HDR" es 4K, no 1080p).
+const RESOLUTION_TOKENS = [
+  [/\b(4320p?|8k)\b/, '8K'],
+  [/\b(2160p?|4k|uhd)\b/, '4K'],
+  [/\b1440p?\b/, '1440p'],
+  [/\b1080[pi]?\b/, '1080p'],
+  [/\b720[pi]?\b/, '720p'],
+  [/\b576[pi]?\b/, '576p'],
+  [/\b480[pi]?\b/, '480p'],
+  [/\b360[pi]?\b/, '360p']
+];
+
 function getResolutionTag(row) {
-  const str = [row.resolution, row.quality, row.release_name, row.title, row.name].filter(Boolean).join(' ').toLowerCase();
-  if (str.includes('2160') || /\b4k\b/.test(str) || /\buhd\b/.test(str)) return '4K';
-  if (str.includes('1080')) return '1080p';
-  if (str.includes('720')) return '720p';
-  if (str.includes('480')) return '480p';
-  return row.quality || row.resolution || 'N/D';
+  const str = [row.resolution, row.quality, row.release_name, row.title, row.name]
+    .filter(Boolean).join(' ').toLowerCase();
+  for (const [pattern, tag] of RESOLUTION_TOKENS) {
+    if (pattern.test(str)) return tag;
+  }
+  // Sin altura reconocible se conserva lo que declara la base, ya saneado: el
+  // texto se muestra en varias líneas de la ficha y en el nombre corto.
+  const declared = sanitizeOneLine(row.quality || row.resolution, 24);
+  return declared || 'N/D';
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +371,13 @@ function getResolutionTag(row) {
 // 5xx puntuales): vale la pena un segundo intento antes de rendirse.
 const TRANSIENT_ERROR = /network|fetch|timed?\s*out|timeout|econn|socket|abort|gateway|temporar|502|503|504/i;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// Cuántas filas se piden, cuántas se releen para el cotejo en memoria y cuántas
+// se devuelven. El ranking ordena por calidad e idioma, no por seeders, así que
+// el grupo de candidatos tiene que ser mayor que la respuesta final.
+const CANDIDATE_LIMIT = 50;
+const SCAN_LIMIT = 50;
+const MAX_STREAMS = 25;
 
 // Hasta 2 intentos por consulta; los errores permanentes (401, sintaxis, RLS)
 // no se reintentan para no duplicar la espera del usuario.
@@ -333,12 +427,19 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
       return { streams: [] };
     }
     // Construcción de query
+    // select('*') a propósito: la tabla admite varias alternativas por campo
+    // (info_hash/hash, size/size_bytes, audio/lang…) y una lista fija de
+    // columnas haría que PostgREST fallara si alguna no existe. El coste se
+    // acota con el límite, que sube a 50 candidatos porque el orden final
+    // prioriza calidad e idioma mientras la base solo sabe ordenar por
+    // seeders: con 25, el 4K con cuatro seeders se quedaba fuera sin llegar a
+    // valorarse. Lo que sale al usuario se recorta aparte a MAX_STREAMS.
     let query = supabase
       .from('torrents')
       .select('*')
       .eq('imdb_id', imdbId)
       .order('seeders', { ascending: false, nullsFirst: false })
-      .limit(25);
+      .limit(CANDIDATE_LIMIT);
 
     // Para series/anime: filtrar por temporada y episodio si vienen en el ID
     const isSeries = type === 'series' || type === 'anime';
@@ -358,11 +459,13 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
         if (!row || typeof row !== 'object') return null;
         let infoHash = row.info_hash || row.infoHash || row.hash || null;
         if (infoHash) infoHash = infoHash.toString().trim().toLowerCase();
+        // El magnet se analiza una vez por fila: los tres extractores reciben
+        // la URL ya parseada y no vuelven a construirla.
         const magnet = parseMagnetUrl(row.magnet_url || row.magnetUrl || row.magnet);
         if (!isValidInfoHash(infoHash)) infoHash = extractInfoHashFromMagnet(magnet);
         if (!isValidInfoHash(infoHash)) return null;
         return buildStreamEntry(row, infoHash, extractTrackersFromMagnet(magnet), imdbId,
-          extractTitleFromMagnet(magnet), packSeason);
+          extractTitleFromMagnet(magnet), packSeason, season);
       })
       .filter(Boolean);
 
@@ -399,6 +502,38 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
       }
     }
 
+    // Último recurso: releer la temporada completa y descartar en memoria todo
+    // lo que no sea el episodio pedido. Resuelve las filas con season/episode
+    // como texto ("2", "05"), que el filtro de PostgREST no encuentra, y los
+    // packs guardados con episode vacío en vez de NULL. El cotejo se hace
+    // siempre aquí, así que no puede colarse un episodio equivocado.
+    if (isSeries && season !== null && episode !== null && streamEntries.length === 0) {
+      console.log(`[Stream] Sigue sin fuente; cotejando la temporada ${season} en memoria para ${imdbId}`);
+      const seasonQuery = supabase
+        .from('torrents')
+        .select('*')
+        .eq('imdb_id', imdbId)
+        .order('seeders', { ascending: false, nullsFirst: false })
+        .limit(SCAN_LIMIT);
+      const scanned = await runQuery(seasonQuery, `temporada ${season} ${imdbId}`);
+      if (scanned.error) {
+        console.error('[Supabase] Error query temporada:', scanned.error.message || scanned.error.name || 'desconocido', scanned.error.details || '');
+        return { streams: [] };
+      }
+      const rows = Array.isArray(scanned.data) ? scanned.data : [];
+      const sameSeason = rows.filter(row => row && typeof row === 'object' && toFiniteNumber(row.season) === season);
+      const exactRows = sameSeason.filter(row => toFiniteNumber(row.episode) === episode);
+      // Sin episodio exacto solo se aceptan los packs de la temporada: un
+      // capítulo vecino nunca se ofrece como si fuera el pedido.
+      const packRows = exactRows.length ? [] : sameSeason.filter(row => toFiniteNumber(row.episode) === null);
+      const looseEntries = mapRows(exactRows.length ? exactRows : packRows, exactRows.length ? null : season);
+      if (looseEntries.length) {
+        data = exactRows.length ? exactRows : packRows;
+        streamEntries = looseEntries;
+        console.log(`[Stream] Recuperadas ${looseEntries.length} fuentes cotejando en memoria (${exactRows.length ? 'episodio exacto' : 'pack de temporada'})`);
+      }
+    }
+
     if (!streamEntries.length) {
       console.log(`[Stream] Sin fuentes válidas para ${imdbId}${isSeries ? ` S:${season} E:${episode}` : ''}`);
       // Vacío confirmado y sano: cache corto para evitar repetir consultas.
@@ -406,7 +541,8 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
     }
     console.log(`[Stream] ${data.length} filas procesadas para ${imdbId} en ${Date.now() - start}ms`);
 
-    // Ordenar de forma determinista: calidad, idioma, seeders y tamaño.
+    // Ordenar de forma determinista: disponibilidad, calidad, idioma, seeders,
+    // leechers y tamaño.
     streamEntries.sort(compareStreamEntries);
 
     const seen = new Set();
@@ -415,7 +551,7 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
-    });
+    }).slice(0, MAX_STREAMS);
 
     console.log(`[Stream] → Enviando ${streams.length} streams válidos`);
     // stale-if-error: si una actualización falla en el borde o en el
@@ -517,10 +653,14 @@ builder.defineStreamHandler(cachedStreamHandler);
 // Formateadores y comparadores de Stream
 // ---------------------------------------------------------------------------
 const RESOLUTION_WEIGHT = {
+  '8K': 8000,
   '4K': 4000,
+  '1440p': 3500,
   '1080p': 3000,
   '720p': 2000,
+  '576p': 1300,
   '480p': 1000,
+  '360p': 600,
   'N/D': 0
 };
 
@@ -530,35 +670,65 @@ const LANGUAGE_WEIGHT = {
   'LAT': 350,
   'ESP': 300,
   'VOSE': 200,
+  'VOST': 180,
+  'SUB': 120,
   'ENG': 100,
   'N/D': 0
 };
 
+// Peso de una resolución que no está en la tabla ("WEBRip", "HDTV"): se le
+// busca la altura que declare y, si no dice ninguna, vale 0 como N/D.
+function resolutionWeight(tag) {
+  if (typeof tag !== 'string') return 0;
+  if (tag in RESOLUTION_WEIGHT) return RESOLUTION_WEIGHT[tag];
+  for (const [pattern, known] of RESOLUTION_TOKENS) {
+    if (pattern.test(tag)) return RESOLUTION_WEIGHT[known] ?? 0;
+  }
+  return 0;
+}
+
+// Orden de preferencia. Lo primero es que la fuente esté viva: un 4K sin
+// seeders no reproduce, así que baja por debajo de cualquier fuente sana sea
+// cual sea su calidad. Después manda la calidad, luego el idioma, y solo dentro
+// de un mismo tramo la disponibilidad. El hash al final fija un orden estable:
+// dos peticiones idénticas devuelven la misma lista, byte a byte.
 function compareStreamEntries(a, b) {
-  const resDiff = (RESOLUTION_WEIGHT[b.resolution] ?? 0) - (RESOLUTION_WEIGHT[a.resolution] ?? 0);
+  const health = (b.seeders > 0 ? 1 : 0) - (a.seeders > 0 ? 1 : 0);
+  if (health !== 0) return health;
+
+  const resDiff = resolutionWeight(b.resolution) - resolutionWeight(a.resolution);
   if (resDiff !== 0) return resDiff;
 
   const langDiff = (LANGUAGE_WEIGHT[b.langTag] ?? 0) - (LANGUAGE_WEIGHT[a.langTag] ?? 0);
   if (langDiff !== 0) return langDiff;
 
-  const seederDiff = (b.seeders ?? 0) - (a.seeders ?? 0);
+  const seederDiff = b.seeders - a.seeders;
   if (seederDiff !== 0) return seederDiff;
 
-  return (b.sizeBytes ?? 0) - (a.sizeBytes ?? 0);
+  if (a.leecherCount !== b.leecherCount) {
+    // Sin leechers declarados seisitúa al final del tramo, no en el primero.
+    if (a.leecherCount === null) return 1;
+    if (b.leecherCount === null) return -1;
+    return a.leecherCount - b.leecherCount;
+  }
+
+  if (b.sizeBytes !== a.sizeBytes) return b.sizeBytes - a.sizeBytes;
+  return a.infoHash < b.infoHash ? -1 : a.infoHash > b.infoHash ? 1 : 0;
 }
 
 // seasonPack: número de temporada cuando la fila es un pack completo en vez
 // del episodio exacto (se etiqueta para que el usuario sepa qué descarga).
-function buildStreamEntry(row, infoHash, magnetTrackers = [], imdbId = '', magnetTitle = null, seasonPack = null) {
+function buildStreamEntry(row, infoHash, magnetTrackers = [], imdbId = '', magnetTitle = null, seasonPack = null, season = null) {
   const metadata = { ...row, name: row.name || magnetTitle };
   const langTag = getLanguageTag(metadata);
   const resolution = getResolutionTag(metadata);
   const sizeGB = formatSizeGB(row);
   const sizeBytes = parseSizeBytes(row);
-  const seeders = row.seeders ?? row.seed ?? 0;
+  const seeders = Math.max(0, toFiniteNumber(row.seeders ?? row.seed) ?? 0);
+  const leecherCount = toFiniteNumber(row.leechers);
   const audio = sanitizeOneLine(row.audio || row.language || row.lang) || 'No indicado';
   const subs = sanitizeOneLine(row.subtitles || row.subs) || 'No indicados';
-  const rawTitle = row.title || row.release_name || row.name || magnetTitle || 'Sin título';
+  const rawTitle = row.title || row.release_name || row.name || magnetTitle || '';
   const titleDisplay = sanitizeOneLine(rawTitle) || 'Sin título';
   const codec = sanitizeOneLine(row.codec || row.video_codec) || '—';
   const group = sanitizeOneLine(row.release_group || row.group || row.team) || '—';
@@ -573,7 +743,8 @@ function buildStreamEntry(row, infoHash, magnetTrackers = [], imdbId = '', magne
     ...(seasonPack !== null ? [`🗂️ Pack de la temporada ${seasonPack} completa (elige el episodio al reproducir)`] : []),
     `🔊 Audio: ${audio} | 📝 Subs: ${subs}`,
     `💾 Tamaño: ${sizeGB} GB`,
-    `👥 Seeders: ${seeders}  |  🌱 Leechers: ${row.leechers ?? '—'}`,
+    `👥 Seeders: ${seeders}  |  🌱 Leechers: ${leecherCount ?? '—'}`,
+    ...(seeders > 0 ? [] : ['⚠️ Sin seeders ahora mismo: puede que no se pueda reproducir']),
     `⚙️ Codec: ${codec}  |  📦 Grupo: ${group}`,
     `⭐ Calidad: ${quality}`
   ];
@@ -592,9 +763,10 @@ function buildStreamEntry(row, infoHash, magnetTrackers = [], imdbId = '', magne
     infoHash: infoHash.toLowerCase(),
     ...(fileIdx !== undefined ? { fileIdx } : {}),
     behaviorHints: {
-      // Identifica título + calidad + idioma: la reproducción continua solo
-      // agrupa episodios de la misma serie, nunca títulos distintos.
-      bingeGroup: `nexo-play|${imdbId}|${resolution.toLowerCase()}-${langTag.toLowerCase()}`,
+      // Identifica título + temporada + calidad + idioma: la reproducción
+      // continua solo agrupa episodios de la misma temporada y nunca títulos
+      // distintos, así Stremio no encadena un 1080p con un 4K.
+      bingeGroup: `nexo-play|${imdbId}|${season === null ? 'movie' : `s${season}`}|${resolution.toLowerCase()}-${langTag.toLowerCase()}`,
       ...(sizeBytes ? { videoSize: sizeBytes } : {}),
       ...(rawTitle ? { filename: titleDisplay } : {})
     },
@@ -605,8 +777,10 @@ function buildStreamEntry(row, infoHash, magnetTrackers = [], imdbId = '', magne
     stream,
     resolution,
     langTag,
-    seeders: Number.isFinite(Number(seeders)) ? Number(seeders) : 0,
-    sizeBytes: sizeBytes || 0
+    seeders,
+    leecherCount: leecherCount === null || leecherCount < 0 ? null : leecherCount,
+    sizeBytes: sizeBytes || 0,
+    infoHash: infoHash.toLowerCase()
   };
 }
 
@@ -620,4 +794,4 @@ function buildStream(row, infoHash, magnetTrackers = [], imdbId = '') {
 const addonInterface = builder.getInterface();
 module.exports = addonInterface;
 
-module.exports.helpers = { parseStremioId, getLanguageTag, formatSizeGB, extractInfoHashFromMagnet, extractTrackersFromMagnet, streamHandler, createCachedStreamHandler, cachedStreamHandler, getSupabaseClient, configure, configStatus, normalizeSupabaseUrl, cleanEnvValue };
+module.exports.helpers = { parseStremioId, getLanguageTag, getResolutionTag, detectLanguageTag, formatSizeGB, parseSizeBytes, extractInfoHashFromMagnet, extractTrackersFromMagnet, extractTitleFromMagnet, sanitizeOneLine, buildStreamEntry, compareStreamEntries, streamHandler, createCachedStreamHandler, cachedStreamHandler, getSupabaseClient, configure, configStatus, normalizeSupabaseUrl, cleanEnvValue };
