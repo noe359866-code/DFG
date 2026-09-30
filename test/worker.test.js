@@ -146,9 +146,16 @@ test('health never announces cache and the worker configures Supabase from env',
   assert.equal(bare.version, addon.manifest.version);
   assert.deepEqual(bare.supabase, { configured: false, url: 'missing', keyType: 'none' },
     '/health diagnostica las variables sin exponer sus valores');
+  assert.deepEqual(bare.diagnostic, {
+    code: 'SUPABASE_URL_MISSING',
+    message: 'Define SUPABASE_URL en los secretos del despliegue.'
+  }, 'el diagnóstico indica la acción correctiva sin mostrar secretos');
 
   const injected = await fetchWorker('/health', { env: { SUPABASE_URL: 'https://example.supabase.co', SUPABASE_ANON_KEY: 'anon' } });
-  assert.deepEqual((await injected.json()).supabase, { configured: true, url: 'ok', keyType: 'anon' });
+  const healthyConfig = await injected.json();
+  assert.deepEqual(healthyConfig.supabase, { configured: true, url: 'ok', keyType: 'anon' });
+  assert.equal(healthyConfig.diagnostic.code, 'CONFIG_PRESENT');
+  assert.match(healthyConfig.diagnostic.message, /no comprueba la conexión/);
   const client = addon.helpers.getSupabaseClient();
   assert.ok(client, 'el Worker inyecta los secretos en el cliente de Supabase');
   assert.equal(client.supabaseUrl, 'https://example.supabase.co');

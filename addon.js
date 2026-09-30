@@ -291,14 +291,19 @@ async function runQuery(query, label) {
   let lastResult = null;
   for (let attempt = 1; attempt <= 2; attempt++) {
     const started = Date.now();
-    const result = await query.abortSignal(AbortSignal.timeout(8000));
-    lastResult = result;
-    if (!result.error) return result;
-    const err = result.error;
-    const blob = `${err.message || ''} ${err.details || ''} ${err.hint || ''} ${err.code || ''}`;
+    try {
+      const result = await query.abortSignal(AbortSignal.timeout(8000));
+      lastResult = result || { data: null, error: new Error('Supabase devolvió una respuesta vacía') };
+    } catch (error) {
+      // Fallos de transporte/AbortSignal también pueden rechazar la promesa.
+      lastResult = { data: null, error };
+    }
+    if (!lastResult.error) return lastResult;
+    const err = lastResult.error;
+    const blob = `${err.message || ''} ${err.details || ''} ${err.hint || ''} ${err.code || ''} ${err.status || ''} ${err.name || ''}`;
     const transient = TRANSIENT_ERROR.test(blob);
-    console.warn(`[Supabase] Error en ${label} (intento ${attempt}/2, ${Date.now() - started}ms): ${err.message || 'desconocido'}${transient && attempt < 2 ? ' — reintentando…' : ''}`);
-    if (!transient || attempt === 2) return result;
+    console.warn(`[Supabase] Error en ${label} (intento ${attempt}/2, ${Date.now() - started}ms): ${err.message || err.name || 'desconocido'}${transient && attempt < 2 ? ' — reintentando…' : ''}`);
+    if (!transient || attempt === 2) return lastResult;
     await sleep(300);
   }
   return lastResult;
@@ -348,18 +353,32 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
     }
     // Para movie no filtramos season/episode aunque existan nulos en DB
 
-    let { data, error } = { data: null, error: null };
-    let seasonPack = null;
-    {
-      const result = await runQuery(query, `consulta ${imdbId}`);
-      data = result.data;
-      error = result.error;
-    }
+    const mapRows = (rows, packSeason = null) => (Array.isArray(rows) ? rows : [])
+      .map(row => {
+        if (!row || typeof row !== 'object') return null;
+        let infoHash = row.info_hash || row.infoHash || row.hash || null;
+        if (infoHash) infoHash = infoHash.toString().trim().toLowerCase();
+        const magnet = parseMagnetUrl(row.magnet_url || row.magnetUrl || row.magnet);
+        if (!isValidInfoHash(infoHash)) infoHash = extractInfoHashFromMagnet(magnet);
+        if (!isValidInfoHash(infoHash)) return null;
+        return buildStreamEntry(row, infoHash, extractTrackersFromMagnet(magnet), imdbId,
+          extractTitleFromMagnet(magnet), packSeason);
+      })
+      .filter(Boolean);
 
-    // Sin episodio exacto: los packs de temporada completa (episode NULL)
-    // también reproducen el capítulo; se ofrecen etiquetados como PACK.
-    if (!error && isSeries && season !== null && episode !== null && (!data || data.length === 0)) {
-      console.log(`[Stream] Sin episodio exacto; buscando pack de la temporada ${season} para ${imdbId}`);
+    const exact = await runQuery(query, `consulta ${imdbId}`);
+    let data = exact.data;
+    if (exact.error) {
+      const error = exact.error;
+      console.error('[Supabase] Error query:', error.message || error.name || 'desconocido', error.details || '');
+      return { streams: [] };
+    }
+    let streamEntries = mapRows(data);
+
+    // Si no hay episodio exacto o sus filas no contienen ningún torrent válido,
+    // intenta packs de temporada: fallback útil ante filas huérfanas/malformadas.
+    if (isSeries && season !== null && episode !== null && streamEntries.length === 0) {
+      console.log(`[Stream] Sin fuente válida del episodio; buscando pack de la temporada ${season} para ${imdbId}`);
       const packQuery = supabase
         .from('torrents')
         .select('*')
@@ -369,54 +388,25 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
         .order('seeders', { ascending: false, nullsFirst: false })
         .limit(10);
       const pack = await runQuery(packQuery, `pack T${season} ${imdbId}`);
-      if (!pack.error && pack.data && pack.data.length > 0) {
+      if (pack.error) {
+        console.error('[Supabase] Error query pack:', pack.error.message || pack.error.name || 'desconocido', pack.error.details || '');
+        return { streams: [] };
+      }
+      const packEntries = mapRows(pack.data, season);
+      if (packEntries.length) {
         data = pack.data;
-        seasonPack = season;
-      } else if (pack.error) {
-        console.error('[Supabase] Error query pack:', pack.error.message, pack.error.details || '');
+        streamEntries = packEntries;
       }
     }
 
-    if (error) {
-      console.error('[Supabase] Error query:', error.message, error.details || '');
-      return { streams: [] };
-    }
-
-    if (!data || data.length === 0) {
-      console.log(`[Stream] Sin resultados para ${imdbId}${isSeries ? ` S:${season} E:${episode}` : ''}`);
-      // Respuesta vacía válida (no es un fallo): se cachea brevemente para no
-      // repetir la consulta por cada cliente que pregunte por el mismo título.
+    if (!streamEntries.length) {
+      console.log(`[Stream] Sin fuentes válidas para ${imdbId}${isSeries ? ` S:${season} E:${episode}` : ''}`);
+      // Vacío confirmado y sano: cache corto para evitar repetir consultas.
       return { streams: [], cacheMaxAge: 60 };
     }
+    console.log(`[Stream] ${data.length} filas procesadas para ${imdbId} en ${Date.now() - start}ms`);
 
-    console.log(`[Stream] ${data.length} resultados para ${imdbId} en ${Date.now() - start}ms`);
-
-    // Mapeo a formato Stremio y ordenación optimizada por calidad, idioma y semillas
-    const streamEntries = data
-      .map((row) => {
-        // --- InfoHash con fallback a magnetUrl ---
-        let infoHash = row.info_hash || row.infoHash || row.hash || null;
-        if (infoHash) infoHash = infoHash.toString().trim().toLowerCase();
-
-        const magnet = parseMagnetUrl(row.magnet_url || row.magnetUrl || row.magnet);
-        if (!isValidInfoHash(infoHash)) {
-          // Intentar extraer de magnet
-          const extracted = extractInfoHashFromMagnet(magnet);
-          if (extracted) infoHash = extracted;
-        }
-
-        if (!isValidInfoHash(infoHash)) {
-          return null;
-        }
-
-        const magnetTrackers = extractTrackersFromMagnet(magnet);
-        const magnetTitle = extractTitleFromMagnet(magnet);
-        return buildStreamEntry(row, infoHash, magnetTrackers, imdbId, magnetTitle, seasonPack);
-      })
-      .filter(Boolean);
-
-    // Ordenar de forma determinista para ofrecer la mejor experiencia:
-    // Mayor resolución -> Mejor compatibilidad de idioma -> Más seeders -> Mayor tamaño
+    // Ordenar de forma determinista: calidad, idioma, seeders y tamaño.
     streamEntries.sort(compareStreamEntries);
 
     const seen = new Set();
@@ -481,7 +471,7 @@ function createCachedStreamHandler(handler, {
     }).finally(() => {
       if (pending.get(key) === request) pending.delete(key);
     });
-    if (pending.size < maxEntries) pending.set(key, request);
+    pending.set(key, request);
     return request;
   }
   return async function cached(args, requestKeepAlive = keepAlive) {
@@ -500,7 +490,7 @@ function createCachedStreamHandler(handler, {
       value.staleRevalidate = Math.max(0, Math.floor((hit.staleUntil - Math.max(time, hit.expires)) / 1000));
       // stale-if-error del navegador termina junto con la ventana absoluta.
       if (Number.isInteger(value.staleError)) value.staleError = value.staleRevalidate;
-      if (hit.expires <= time && hit.retryAt <= time && !pending.has(key) && pending.size < maxEntries) {
+      if (hit.expires <= time && hit.retryAt <= time && !pending.has(key)) {
         const background = refresh(key, args, hit).catch(() => {});
         // El Worker mantiene vivo el isolate después de enviar la respuesta
         // con ctx.waitUntil; en local el trabajo sigue su curso normal.
@@ -592,9 +582,9 @@ function buildStreamEntry(row, infoHash, magnetTrackers = [], imdbId = '', magne
   // trackers, con fallback a trackers públicos de alta disponibilidad.
   const trackers = buildTrackers(row.trackers, magnetTrackers);
 
-  const fileIdx = Number.isSafeInteger(row.file_idx ?? row.fileIdx) && (row.file_idx ?? row.fileIdx) >= 0
-    ? (row.file_idx ?? row.fileIdx)
-    : undefined;
+  const rawFileIdx = row.file_idx ?? row.fileIdx;
+  const numericFileIdx = rawFileIdx === '' || rawFileIdx === null || rawFileIdx === undefined ? NaN : Number(rawFileIdx);
+  const fileIdx = Number.isSafeInteger(numericFileIdx) && numericFileIdx >= 0 ? numericFileIdx : undefined;
 
   const stream = {
     name,
