@@ -580,3 +580,26 @@ test('large result sets keep both Spanish and English represented', () => {
   assert.ok(selected.some(entry => entry.langTag === 'ENG'));
   assert.equal(selected.length, 25);
 });
+
+
+test('anime prefers absolute_episode over a season pack', async () => {
+  const m = sequenceMock([
+    { data: [{ info_hash: hexHash(50), type: 'anime', season: 1, episode: null, title: 'Anime Season Pack 1080p', seeders: 20 }], error: null },
+    { data: [{ info_hash: hexHash(51), type: 'anime', absolute_episode: 25, title: 'Anime E25 1080p WEB-DL', seeders: 8 }], error: null }
+  ]);
+  const result = await addon.helpers.streamHandler({ type: 'anime', id: 'tt1234567:1:25' }, m.client);
+  assert.equal(result.streams[0].infoHash, hexHash(51));
+});
+
+test('diversity selector never exceeds the requested limit', () => {
+  const entries = ['es', 'en', 'dual'].map((language, i) =>
+    addon.helpers.buildStreamEntry({
+      info_hash: hexHash(60 + i),
+      title: 'Movie 1080p',
+      language,
+      seeders: 10
+    }, hexHash(60 + i), [], 'tt1234567')
+  );
+  const selected = addon.helpers.selectDiverseStreams(entries, 1);
+  assert.equal(selected.length, 1);
+});
