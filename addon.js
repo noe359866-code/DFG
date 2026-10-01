@@ -511,15 +511,8 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
       const packRows = rows.filter(row => row && toFiniteNumber(row.episode) === null);
       streamEntries = mapRows(exactRows);
       data = exactRows;
-      if (!streamEntries.length) {
-        const packEntries = mapRows(packRows, season);
-        if (packEntries.length) {
-          console.log(`[Stream] Sin fuente válida del episodio; usando pack de la temporada ${season} para ${imdbId}`);
-          data = packRows;
-          streamEntries = packEntries;
-        }
-      }
 
+      // Anime: absolute_episode debe probarse antes del pack de temporada.
       if (!streamEntries.length && type === 'anime') {
         const absoluteResult = await runQuery(
           bySeeders(baseQuery().eq('absolute_episode', episode), CANDIDATE_LIMIT),
@@ -529,6 +522,16 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
           const absoluteRows = Array.isArray(absoluteResult.data) ? absoluteResult.data : [];
           streamEntries = mapRows(absoluteRows);
           data = absoluteRows;
+        }
+      }
+
+      // El pack queda como último recurso.
+      if (!streamEntries.length) {
+        const packEntries = mapRows(packRows, season);
+        if (packEntries.length) {
+          console.log(`[Stream] Sin fuente válida del episodio; usando pack de la temporada ${season} para ${imdbId}`);
+          data = packRows;
+          streamEntries = packEntries;
         }
       }
 
@@ -706,14 +709,14 @@ const RESOLUTION_WEIGHT = {
 };
 
 const LANGUAGE_WEIGHT = {
-  'DUAL': 500,
-  'CAST': 400,
-  'LAT': 350,
-  'ESP': 300,
-  'VOSE': 200,
-  'VOST': 180,
-  'SUB': 120,
-  'ENG': 100,
+  'DUAL': 35,
+  'CAST': 32,
+  'LAT': 30,
+  'ESP': 28,
+  'VOSE': 22,
+  'VOST': 20,
+  'SUB': 12,
+  'ENG': 18,
   'N/D': 0
 };
 
@@ -767,7 +770,10 @@ function metadataScore(entry) {
   const audioText = textLower(Array.isArray(row.audio) ? row.audio.join(' ') : row.audio);
   const audioScore = /atmos|truehd|dts-hd|dts:x/.test(audioText) ? 5 :
     /aac|ac3|eac3|ddp|dolby/.test(audioText) ? 3 : 0;
-  const subtitleScore = row.subtitles || row.subs ? 1 : 0;
+  const subtitleValue = row.subtitles ?? row.subs;
+  const subtitleScore = Array.isArray(subtitleValue)
+    ? (subtitleValue.length > 0 ? 1 : 0)
+    : (subtitleValue ? 1 : 0);
   const sourceScore = /remux|bluray|blu-ray/.test(releaseText) ? 12 :
     /web[- .]?dl|web[- .]?rip|webdl|webrip/.test(releaseText) ? 9 :
     /hdtv/.test(releaseText) ? 4 : 0;
@@ -795,6 +801,7 @@ function selectDiverseStreams(entries, maxStreams = MAX_STREAMS) {
   const selectedKeys = new Set();
 
   for (const family of ['dual', 'es', 'en']) {
+    if (selected.length >= maxStreams) break;
     const candidate = ranked.find(entry => languageFamily(entry.langTag) === family);
     if (!candidate) continue;
     const key = candidate.stream.infoHash + ':' + (candidate.stream.fileIdx ?? '');
