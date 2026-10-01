@@ -743,10 +743,14 @@ function metadataScore(entry) {
 }
 
 function compareStreamEntries(a, b) {
-  const scoreDiff = metadataScore(b) - metadataScore(a);
-  if (Math.abs(scoreDiff) > 0.0001) return scoreDiff;
+  // La disponibilidad sigue siendo un filtro duro: una fuente sin pares no
+  // debe desplazar una fuente saludable solo por tener más resolución.
   const health = healthTier(b.seeders) - healthTier(a.seeders);
   if (health !== 0) return health;
+
+  const scoreDiff = metadataScore(b) - metadataScore(a);
+  if (Math.abs(scoreDiff) > 0.0001) return scoreDiff;
+
   const seederDiff = b.seeders - a.seeders;
   if (seederDiff !== 0) return seederDiff;
   if (a.leecherCount !== b.leecherCount) {
