@@ -547,3 +547,36 @@ test('stream queries include the requested content type', async () => {
   await addon.helpers.streamHandler({ type: 'movie', id: 'tt1234567' }, m.client);
   assert.ok(m.calls.some(c => c[0] === 'eq' && c[1] === 'type' && c[2] === 'movie'));
 });
+
+
+test('structured language fields accept exact ISO codes without false positives', () => {
+  assert.equal(addon.helpers.getLanguageTag({ language: 'es' }), 'ESP');
+  assert.equal(addon.helpers.getLanguageTag({ language: 'en-US' }), 'ENG');
+  assert.equal(addon.helpers.getLanguageTag({ lang: 'en', title: 'The Last Castle' }), 'ENG');
+  assert.equal(addon.helpers.getLanguageTag({ language: 'en', title: 'Historia española' }), 'ENG');
+});
+
+test('poor release sources are penalized below clean WEB-DL sources', () => {
+  const rows = [
+    { info_hash: hexHash(40), title: 'Movie 4K CAM', seeders: 8, language: 'es' },
+    { info_hash: hexHash(41), title: 'Movie 1080p WEB-DL', seeders: 8, language: 'es' }
+  ];
+  const result = await streamHandler({ type: 'movie', id: 'tt1234567' }, mock(rows).client);
+  assert.deepEqual(result.streams.map(stream => stream.infoHash), [hexHash(41), hexHash(40)]);
+});
+
+test('large result sets keep both Spanish and English represented', () => {
+  const rows = Array.from({ length: 30 }, (_, i) => ({
+    info_hash: hexHash(100 + i),
+    title: i === 29 ? 'Movie 1080p English' : `Movie 1080p Español ${i}`,
+    seeders: i === 29 ? 1 : 20 - (i % 10),
+    language: i === 29 ? 'en' : 'es'
+  }));
+  const entries = rows.map(row => addon.helpers.buildStreamEntry(
+    row, row.info_hash, [], 'tt1234567'
+  ));
+  const selected = addon.helpers.selectDiverseStreams(entries, 25);
+  assert.ok(selected.some(entry => entry.langTag === 'ESP'));
+  assert.ok(selected.some(entry => entry.langTag === 'ENG'));
+  assert.equal(selected.length, 25);
+});
