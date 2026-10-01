@@ -349,6 +349,10 @@ function getLanguageTag(row) {
     if (/^es(?:[-_]?(?:es|mx|419|ar|cl|co|pe))?$/.test(value)) return 'ESP';
     if (/^en(?:[-_]?(?:us|gb|au|ca))?$/.test(value)) return 'ENG';
     if (/^(dual|multi|es[+/,]en|en[+/,]es)$/.test(value)) return 'DUAL';
+
+    // Dedicated language fields may contain human-readable values too.
+    const explicitTag = detectLanguageTag(value);
+    if (explicitTag) return explicitTag;
   }
 
   const audioValues = Array.isArray(row.audio) ? row.audio : [row.audio];
