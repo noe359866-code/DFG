@@ -556,7 +556,7 @@ test('structured language fields accept exact ISO codes without false positives'
   assert.equal(addon.helpers.getLanguageTag({ language: 'en', title: 'Historia española' }), 'ENG');
 });
 
-test('poor release sources are penalized below clean WEB-DL sources', () => {
+test('poor release sources are penalized below clean WEB-DL sources', async () => {
   const rows = [
     { info_hash: hexHash(40), title: 'Movie 4K CAM', seeders: 8, language: 'es' },
     { info_hash: hexHash(41), title: 'Movie 1080p WEB-DL', seeders: 8, language: 'es' }
