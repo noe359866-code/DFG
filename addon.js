@@ -493,30 +493,26 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
     let data = [];
     let streamEntries = [];
     if (isSeries) {
-      // Una consulta trae el episodio exacto y los packs de temporada
-      // (episode IS NULL); si PostgREST no encuentra filas, se coteja en memoria.
-      console.log(`[Stream] Filtrando S:${season} E:${episode} para ${imdbId}`);
-      const result = await runQuery(
-        bySeeders(baseQuery().eq('season', season).or(`episode.eq.${episode},episode.is.null`), CANDIDATE_LIMIT),
-        `consulta ${imdbId} S${season}E${episode}`
+      // No mezclamos episodios y packs en el mismo LIMIT: un pack con muchos
+      // seeders no debe ocultar un episodio exacto que quedó fuera de las 50 filas.
+      console.log(`[Stream] Buscando fuente exacta S:${season} E:${episode} para ${imdbId}`);
+      const exactResult = await runQuery(
+        bySeeders(baseQuery().eq('season', season).eq('episode', episode), CANDIDATE_LIMIT),
+        `episodio exacto ${imdbId} S${season}E${episode}`
       );
-      if (result.error) {
-        const error = result.error;
-        console.error('[Supabase] Error query:', error.message || error.name || 'desconocido', error.details || '');
+      if (exactResult.error) {
+        console.error('[Supabase] Error episodio exacto:', exactResult.error.message || exactResult.error.name || 'desconocido');
         return { streams: [] };
       }
-
-      const rows = Array.isArray(result.data) ? result.data : [];
-      const exactRows = rows.filter(row => row && toFiniteNumber(row.episode) === episode);
-      const packRows = rows.filter(row => row && toFiniteNumber(row.episode) === null);
+      const exactRows = Array.isArray(exactResult.data) ? exactResult.data : [];
       streamEntries = mapRows(exactRows);
       data = exactRows;
 
-      // Anime: absolute_episode debe probarse antes del pack de temporada.
+      // Anime: el número absoluto puede existir sin una temporada fiable.
       if (!streamEntries.length && type === 'anime') {
         const absoluteResult = await runQuery(
           bySeeders(baseQuery().eq('absolute_episode', episode), CANDIDATE_LIMIT),
-          'anime absoluto E' + episode + ' ' + imdbId
+          `anime absoluto E${episode} ${imdbId}`
         );
         if (!absoluteResult.error) {
           const absoluteRows = Array.isArray(absoluteResult.data) ? absoluteResult.data : [];
@@ -525,22 +521,28 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
         }
       }
 
-      // El pack queda como último recurso.
+      // Solo como fallback: pack de temporada.
       if (!streamEntries.length) {
-        const packEntries = mapRows(packRows, season);
-        if (packEntries.length) {
-          console.log(`[Stream] Sin fuente válida del episodio; usando pack de la temporada ${season} para ${imdbId}`);
-          data = packRows;
-          streamEntries = packEntries;
+        const packResult = await runQuery(
+          bySeeders(baseQuery().eq('season', season).is('episode', null), CANDIDATE_LIMIT),
+          `pack temporada ${imdbId} T${season}`
+        );
+        if (!packResult.error) {
+          const packRows = Array.isArray(packResult.data) ? packResult.data : [];
+          const packEntries = mapRows(packRows, season);
+          if (packEntries.length) {
+            console.log(`[Stream] Usando pack de temporada ${season} como fallback para ${imdbId}`);
+            data = packRows;
+            streamEntries = packEntries;
+          }
         }
       }
 
       if (!streamEntries.length) {
-        // Último recurso: cotejar en memoria por si season/episode vienen con otro tipo.
-        console.log(`[Stream] Sigue sin fuente; cotejando la temporada ${season} en memoria para ${imdbId}`);
-        const scanned = await runQuery(bySeeders(baseQuery(), SCAN_LIMIT), `temporada ${season} ${imdbId}`);
+        console.log(`[Stream] Fallback de cotejo en memoria para ${imdbId} S${season}E${episode}`);
+        const scanned = await runQuery(bySeeders(baseQuery(), SCAN_LIMIT), `scan ${imdbId}`);
         if (scanned.error) {
-          console.error('[Supabase] Error query temporada:', scanned.error.message || scanned.error.name || 'desconocido', scanned.error.details || '');
+          console.error('[Supabase] Error scan:', scanned.error.message || scanned.error.name || 'desconocido');
           return { streams: [] };
         }
         const scannedRows = Array.isArray(scanned.data) ? scanned.data : [];
@@ -558,9 +560,10 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
           selectedExact.length ? null : season
         );
         if (looseEntries.length) {
-          data = looseExact.length ? looseExact : loosePack;
+          data = looseExact.length ? looseExact : (absoluteExact.length ? absoluteExact : loosePack);
           streamEntries = looseEntries;
-          console.log(`[Stream] Recuperadas ${looseEntries.length} fuentes cotejando en memoria (${looseExact.length ? 'episodio exacto' : 'pack de temporada'})`);
+          const matchKind = looseExact.length ? 'episodio exacto' : absoluteExact.length ? 'absolute_episode' : 'pack de temporada';
+          console.log(`[Stream] Recuperadas ${looseEntries.length} fuentes (${matchKind})`);
         }
       }
     } else {
