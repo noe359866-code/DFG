@@ -340,7 +340,31 @@ function detectLanguageTag(text) {
 }
 
 function getLanguageTag(row) {
-  for (const source of LANGUAGE_SOURCES(row)) {
+  const structured = [row.language, row.lang]
+    .flatMap(value => Array.isArray(value) ? value : [value])
+    .filter(value => typeof value === 'string')
+    .map(value => value.trim().toLowerCase());
+
+  for (const value of structured) {
+    if (/^es(?:[-_]?(?:es|mx|419|ar|cl|co|pe))?$/.test(value)) return 'ESP';
+    if (/^en(?:[-_]?(?:us|gb|au|ca))?$/.test(value)) return 'ENG';
+    if (/^(dual|multi|es[+/,]en|en[+/,]es)$/.test(value)) return 'DUAL';
+  }
+
+  const audioValues = Array.isArray(row.audio) ? row.audio : [row.audio];
+  const audioTags = audioValues
+    .filter(value => typeof value === 'string')
+    .map(detectLanguageTag)
+    .filter(Boolean);
+
+  if (audioTags.includes('DUAL') ||
+      (audioTags.some(tag => ['CAST', 'LAT', 'ESP'].includes(tag)) && audioTags.includes('ENG'))) {
+    return 'DUAL';
+  }
+  const audioTag = audioTags.find(tag => tag && tag !== 'N/D');
+  if (audioTag) return audioTag;
+
+  for (const source of [row.release_name, row.title, row.name]) {
     const tag = detectLanguageTag(source);
     if (tag) return tag;
   }
@@ -549,14 +573,15 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
     }
     console.log(`[Stream] ${data.length} filas procesadas para ${imdbId} en ${Date.now() - start}ms`);
 
-    streamEntries.sort(compareStreamEntries);
+    const uniqueEntries = [];
     const seen = new Set();
-    const streams = streamEntries.map(entry => entry.stream).filter(stream => {
-      const key = `${stream.infoHash}:${stream.fileIdx ?? ''}`;
-      if (seen.has(key)) return false;
+    for (const entry of streamEntries) {
+      const key = `${entry.stream.infoHash}:${entry.stream.fileIdx ?? ''}`;
+      if (seen.has(key)) continue;
       seen.add(key);
-      return true;
-    }).slice(0, MAX_STREAMS);
+      uniqueEntries.push(entry);
+    }
+    const streams = selectDiverseStreams(uniqueEntries, MAX_STREAMS).map(entry => entry.stream);
 
     console.log(`[Stream] → Enviando ${streams.length} streams válidos`);
     return { streams, cacheMaxAge: 120, staleRevalidate: 600, staleError: 600 };
@@ -727,6 +752,10 @@ function metadataScore(entry) {
   const langScore = LANGUAGE_WEIGHT[entry.langTag] ?? 0;
   const codec = textLower(row.codec || row.video_codec);
   const hdr = textLower(row.hdr_format || row.hdr);
+  const releaseText = textLower([
+    row.title, row.release_name, row.name, row.quality, row.source
+  ].filter(Boolean).join(' '));
+
   const codecScore = Object.entries(CODEC_WEIGHT).reduce((best, [token, weight]) =>
     codec.includes(token) ? Math.max(best, weight) : best, 0);
   const hdrScore = Object.entries(HDR_WEIGHT).reduce((best, [token, weight]) =>
@@ -735,11 +764,51 @@ function metadataScore(entry) {
   const audioScore = /atmos|truehd|dts-hd|dts:x/.test(audioText) ? 5 :
     /aac|ac3|eac3|ddp|dolby/.test(audioText) ? 3 : 0;
   const subtitleScore = row.subtitles || row.subs ? 1 : 0;
+  const sourceScore = /remux|bluray|blu-ray/.test(releaseText) ? 12 :
+    /web[- .]?dl|web[- .]?rip|webdl|webrip/.test(releaseText) ? 9 :
+    /hdtv/.test(releaseText) ? 4 : 0;
+  const badSourcePenalty = /\b(?:cam|camrip|ts|telesync|tc|telecine|screener|workprint)\b/i.test(releaseText)
+    ? 45 : 0;
   const seedScore = Math.min(numericNonNegative(entry.seeders), 50);
   const leecherPenalty = entry.leecherCount === null ? 0 :
     Math.min(numericNonNegative(entry.leecherCount), 20) * 0.25;
   return resolutionScore + langScore + codecScore + hdrScore + audioScore +
-    subtitleScore + seedScore * 0.4 - leecherPenalty;
+    subtitleScore + sourceScore + seedScore * 0.4 - leecherPenalty - badSourcePenalty;
+}
+
+function languageFamily(tag) {
+  if (tag === 'DUAL') return 'dual';
+  if (['CAST', 'LAT', 'ESP', 'VOSE'].includes(tag)) return 'es';
+  if (tag === 'ENG') return 'en';
+  return 'other';
+}
+
+function selectDiverseStreams(entries, maxStreams = MAX_STREAMS) {
+  const ranked = [...entries].sort(compareStreamEntries);
+  if (ranked.length <= maxStreams) return ranked;
+
+  const selected = [];
+  const selectedKeys = new Set();
+
+  for (const family of ['dual', 'es', 'en']) {
+    const candidate = ranked.find(entry => languageFamily(entry.langTag) === family);
+    if (!candidate) continue;
+    const key = candidate.stream.infoHash + ':' + (candidate.stream.fileIdx ?? '');
+    if (!selectedKeys.has(key)) {
+      selected.push(candidate);
+      selectedKeys.add(key);
+    }
+  }
+
+  for (const entry of ranked) {
+    if (selected.length >= maxStreams) break;
+    const key = entry.stream.infoHash + ':' + (entry.stream.fileIdx ?? '');
+    if (selectedKeys.has(key)) continue;
+    selected.push(entry);
+    selectedKeys.add(key);
+  }
+
+  return selected.sort(compareStreamEntries);
 }
 
 function compareStreamEntries(a, b) {
@@ -841,4 +910,4 @@ function buildStream(row, infoHash, magnetTrackers = [], imdbId = '') {
 const addonInterface = builder.getInterface();
 module.exports = addonInterface;
 
-module.exports.helpers = { numericNonNegative, metadataScore, parseStremioId, getLanguageTag, getResolutionTag, detectLanguageTag, formatSizeGB, parseSizeBytes, extractInfoHashFromMagnet, extractTrackersFromMagnet, extractTitleFromMagnet, sanitizeOneLine, buildStreamEntry, compareStreamEntries, streamHandler, createCachedStreamHandler, cachedStreamHandler, getSupabaseClient, configure, configStatus, normalizeSupabaseUrl, cleanEnvValue, torrentColumns };
+module.exports.helpers = { numericNonNegative, metadataScore, languageFamily, selectDiverseStreams, parseStremioId, getLanguageTag, getResolutionTag, detectLanguageTag, formatSizeGB, parseSizeBytes, extractInfoHashFromMagnet, extractTrackersFromMagnet, extractTitleFromMagnet, sanitizeOneLine, buildStreamEntry, compareStreamEntries, streamHandler, createCachedStreamHandler, cachedStreamHandler, getSupabaseClient, configure, configStatus, normalizeSupabaseUrl, cleanEnvValue, torrentColumns };
