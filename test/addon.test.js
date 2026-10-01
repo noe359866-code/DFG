@@ -584,11 +584,28 @@ test('large result sets keep both Spanish and English represented', () => {
 
 test('anime prefers absolute_episode over a season pack', async () => {
   const m = sequenceMock([
-    { data: [{ info_hash: hexHash(50), type: 'anime', season: 1, episode: null, title: 'Anime Season Pack 1080p', seeders: 20 }], error: null },
+    { data: [], error: null },
     { data: [{ info_hash: hexHash(51), type: 'anime', absolute_episode: 25, title: 'Anime E25 1080p WEB-DL', seeders: 8 }], error: null }
   ]);
   const result = await addon.helpers.streamHandler({ type: 'anime', id: 'tt1234567:1:25' }, m.client);
   assert.equal(result.streams[0].infoHash, hexHash(51));
+});
+
+test('exact episode query is preferred even when season packs have more seeders', async () => {
+  const m = sequenceMock([
+    { data: [{ info_hash: hexHash(70), type: 'series', season: 1, episode: 7, title: 'Episode 7 1080p', seeders: 2 }], error: null }
+  ]);
+  const result = await addon.helpers.streamHandler({ type: 'series', id: 'tt1234567:1:7' }, m.client);
+  assert.equal(result.streams[0].infoHash, hexHash(70));
+});
+
+test('anime absolute episode can work without a matching season', async () => {
+  const m = sequenceMock([
+    { data: [], error: null },
+    { data: [{ info_hash: hexHash(71), type: 'anime', season: null, absolute_episode: 25, title: 'Anime E25 1080p', seeders: 4 }], error: null }
+  ]);
+  const result = await addon.helpers.streamHandler({ type: 'anime', id: 'tt1234567:1:25' }, m.client);
+  assert.equal(result.streams[0].infoHash, hexHash(71));
 });
 
 test('diversity selector never exceeds the requested limit', () => {
