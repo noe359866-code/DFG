@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const addon = require('../addon');
-const { parseStremioId, getLanguageTag, getResolutionTag, formatSizeGB, parseSizeBytes, sanitizeOneLine, extractInfoHashFromMagnet, extractTrackersFromMagnet, streamHandler } = addon.helpers;
+const { parseStremioId, getLanguageTag, getResolutionTag, formatSizeGB, parseSizeBytes, sanitizeOneLine, extractInfoHashFromMagnet, extractTrackersFromMagnet, streamHandler, torrentColumns } = addon.helpers;
 const hash = 'a'.repeat(40);
 test('consistent release and private public description', () => {
   assert.equal(addon.manifest.version, require('../package.json').version);
@@ -43,17 +43,18 @@ test('magnet trackers must be udp or http(s) urls', () => {
 function mock(data, error = null) {
   const calls = [];
   const query = {};
-  for (const method of ['from', 'select', 'eq', 'order', 'limit']) query[method] = (...args) => { calls.push([method, ...args]); return query; };
+  for (const method of ['from', 'select', 'eq', 'or', 'order', 'limit']) query[method] = (...args) => { calls.push([method, ...args]); return query; };
   query.abortSignal = async signal => { assert.ok(signal instanceof AbortSignal); return { data, error }; };
   return { client: () => query, calls };
 }
 test('episode filter, hash fallback, dedup and file index', async () => {
-  const m = mock([{ info_hash: hash, file_idx: 0, audio: 'English' }, { info_hash: hash, file_idx: 0 }, { magnet: `magnet:?xt=urn:btih:${hash}`, file_idx: 1 }, { magnet: 'magnet:bad' }]);
+  const m = mock([{ info_hash: hash, file_idx: 0, season: 0, episode: 1, audio: 'English' }, { info_hash: hash, file_idx: 0, season: 0, episode: 1 }, { magnet: `magnet:?xt=urn:btih:${hash}`, file_idx: 1, season: 0, episode: 1 }, { magnet: 'magnet:bad', season: 0, episode: 1 }]);
   const result = await streamHandler({ type: 'series', id: 'tt1234567:0:1' }, m.client);
   assert.equal(result.streams.length, 2);
   assert.equal(result.streams[0].fileIdx, 0);
   assert.match(result.streams[0].name, /ENG/);
   assert.ok(m.calls.some(c => c[0] === 'eq' && c[1] === 'season' && c[2] === 0));
+  assert.ok(m.calls.some(c => c[0] === 'or' && c[1] === 'episode.eq.1,episode.is.null'), 'una sola consulta pide episodio y packs');
 });
 test('reject invalid requests before database access', async () => {
   for (const args of [{ type: 'series', id: 'tt1234567' }, { type: 'movie', id: 'tt1234567:1:1' }, { type: 'bad', id: 'tt1234567' }]) {
@@ -84,9 +85,9 @@ test('smart ranking prioritizes resolution, language and seeders, with default t
   ]);
   const result = await streamHandler({ type: 'movie', id: 'tt1234567' }, m.client);
   assert.equal(result.streams.length, 3);
-  assert.equal(result.streams[0].infoHash, '3'.repeat(40)); // 4K first
-  assert.equal(result.streams[1].infoHash, '2'.repeat(40)); // 1080p second
-  assert.equal(result.streams[2].infoHash, '1'.repeat(40)); // 720p third
+  assert.equal(result.streams[0].infoHash, '2'.repeat(40)); // 1080p con 5 seeders: fuente sana
+  assert.equal(result.streams[1].infoHash, '1'.repeat(40)); // 720p con 50 seeders: mismo tramo de salud
+  assert.equal(result.streams[2].infoHash, '3'.repeat(40)); // 4K con 2 seeders: por debajo de fuentes sanas
   assert.ok(result.streams[0].sources.length > 0, 'debe incluir trackers por defecto cuando no hay trackers en DB');
   assert.match(result.streams[0].sources[0], /^tracker:udp:\/\//);
 });
@@ -102,7 +103,7 @@ test('magnet title supplies language and resolution; 4k substrings are not quali
   const other = await streamHandler({ type: 'movie', id: 'tt1234567' }, mock([{ info_hash: hash, title: '14km away' }]).client);
   assert.match(other.streams[0].name, /N\/D$/);
 });
-test('cache coalesces requests, isolates returned objects and expires', async () => {
+test('cache isolates returned objects, caches results and expires', async () => {
   let calls = 0;
   let clock = 0;
   const cached = addon.helpers.createCachedStreamHandler(async () => {
@@ -111,13 +112,13 @@ test('cache coalesces requests, isolates returned objects and expires', async ()
   }, { now: () => clock });
   const args = { type: 'movie', id: 'tt1234567' };
   const [a, b] = await Promise.all([cached(args), cached(args)]);
-  assert.equal(calls, 1);
+  assert.equal(calls, 2, 'las promesas de requests concurrentes no se comparten en Workers');
   a.streams.length = 0;
   assert.equal(b.streams.length, 1);
   assert.equal((await cached(args)).streams.length, 1);
   clock = 60000;
   await cached(args);
-  assert.equal(calls, 2);
+  assert.equal(calls, 3, 'la respuesta cacheada expira a los 60 segundos');
 });
 test('cache bounded eviction, type isolation and failed-query retries', async () => {
   let calls = 0;
@@ -151,7 +152,7 @@ test('cache bounded eviction, type isolation and failed-query retries', async ()
   await assert.rejects(rejected({ type: 'movie', id: 'tt1234567' }), /offline/);
 });
 
-test('in-flight requests remain coalesced even when result cache capacity is full', async () => {
+test('cache never shares in-flight promises across concurrent cold requests', async () => {
   let calls = 0;
   let release;
   const gate = new Promise(resolve => { release = resolve; });
@@ -164,7 +165,7 @@ test('in-flight requests remain coalesced even when result cache capacity is ful
   const other = cached({ type: 'movie', id: 'tt7654321' });
   const duplicate = cached({ type: 'movie', id: 'tt1234567' });
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(calls, 2, 'solo hay una consulta activa por clave; capacidad de caché no la duplica');
+  assert.equal(calls, 3, 'cada request cold mantiene su propia promesa de I/O; nunca se espera una promesa de otra request');
   release();
   await Promise.all([first, other, duplicate]);
 });
@@ -263,6 +264,23 @@ test('environment values are trimmed, unquoted and placeholders rejected', t => 
   assert.deepEqual(configStatus(), { configured: false, url: 'missing', keyType: 'none' });
 });
 
+test('torrent column override is sanitized and used by Supabase SELECT', async t => {
+  const { configure } = addon.helpers;
+  t.after(() => configure(null));
+
+  configure({ SUPABASE_TORRENT_COLUMNS: ' info_hash, title, seeders ' });
+  assert.equal(torrentColumns(), 'info_hash,title,seeders');
+  const selected = mock([{ info_hash: hash, title: 'Movie 1080p' }]);
+  await streamHandler({ type: 'movie', id: 'tt1234567' }, selected.client);
+  assert.ok(selected.calls.some(c => c[0] === 'select' && c[1] === 'info_hash,title,seeders'));
+
+  configure({ SUPABASE_TORRENT_COLUMNS: 'info_hash);drop table torrents' });
+  assert.equal(torrentColumns(), '*', 'una lista de columnas no válida vuelve a select(*)');
+  const fallback = mock([{ info_hash: hash, title: 'Movie 1080p' }]);
+  await streamHandler({ type: 'movie', id: 'tt1234567' }, fallback.client);
+  assert.ok(fallback.calls.some(c => c[0] === 'select' && c[1] === '*'));
+});
+
 test('transient database errors are retried once; permanent ones are not', async () => {
   let attempts = 0;
   const query = {};
@@ -294,37 +312,31 @@ test('transient database errors are retried once; permanent ones are not', async
   assert.equal(recovered.streams.length, 1);
 });
 
-test('series fall back to season packs when the exact episode is missing', async () => {
-  const usedIs = [];
-  const query = {};
-  for (const method of ['from', 'select', 'eq', 'order', 'limit']) query[method] = () => query;
-  query.is = (...args) => { usedIs.push(args); return query; };
-  query.abortSignal = async () => usedIs.length
-    ? { data: [{ info_hash: hash, title: 'Temporada completa 1080p Spanish', seeders: 4 }], error: null }
-    : { data: [], error: null };
-
-  const result = await streamHandler({ type: 'series', id: 'tt1234567:2:5' }, () => query);
-  assert.deepEqual(usedIs, [['episode', null]], 'el fallback pregunta por episodios NULL (packs)');
+test('series query episode and season packs together, then scan only if needed', async () => {
+  const m = sequenceMock([
+    { data: [
+      { info_hash: 'inválido', season: 2, episode: 5 },
+      { info_hash: hash, season: 2, episode: null, title: 'Temporada completa 1080p Spanish', seeders: 4 }
+    ], error: null }
+  ]);
+  const result = await streamHandler({ type: 'series', id: 'tt1234567:2:5' }, m.client);
+  assert.equal(m.counters.queries, 1, 'una consulta recupera episodio exacto y pack');
+  assert.ok(m.calls.some(c => c[0] === 'or' && c[1] === 'episode.eq.5,episode.is.null'));
+  assert.equal(m.calls.filter(c => c[0] === 'is').length, 0, 'no se hace una consulta separada para los packs');
   assert.equal(result.streams.length, 1);
   assert.match(result.streams[0].name, /PACK T2/);
   assert.match(result.streams[0].title, /temporada 2 completa/);
 
-  usedIs.length = 0;
-  const movies = await streamHandler({ type: 'movie', id: 'tt1234567' }, () => query);
+  const movies = await streamHandler({ type: 'movie', id: 'tt1234567' }, mock([]).client);
   assert.deepEqual(movies, { streams: [], cacheMaxAge: 60 });
-  assert.equal(usedIs.length, 0, 'las películas nunca consultan packs');
 
-  // Una fila del episodio sin hash no debe bloquear el fallback al pack.
-  usedIs.length = 0;
-  let queryNumber = 0;
-  query.abortSignal = async () => {
-    queryNumber++;
-    return queryNumber === 1
-      ? { data: [{ info_hash: 'inválido' }], error: null }
-      : { data: [{ info_hash: hash, title: 'Pack 720p', seeders: 8 }], error: null };
-  };
-  const repaired = await streamHandler({ type: 'series', id: 'tt1234567:2:5' }, () => query);
-  assert.equal(queryNumber, 2, 'una fila inválida activa la consulta de respaldo');
+  // Una fila exacta sin hash válido activa el cotejo de respaldo en memoria.
+  const repair = sequenceMock([
+    { data: [{ info_hash: 'inválido', season: 2, episode: 5 }], error: null },
+    { data: [{ info_hash: hash, season: 2, episode: null, title: 'Pack 720p', seeders: 8 }], error: null }
+  ]);
+  const repaired = await streamHandler({ type: 'series', id: 'tt1234567:2:5' }, repair.client);
+  assert.equal(repair.counters.queries, 2, 'la consulta de respaldo solo corre cuando no hay fuente válida');
   assert.match(repaired.streams[0].name, /PACK T2/);
 });
 
@@ -335,7 +347,7 @@ test('series fall back to season packs when the exact episode is missing', async
 function sequenceMock(results) {
   const calls = [];
   const query = {};
-  for (const method of ['from', 'select', 'eq', 'is', 'order', 'limit']) {
+  for (const method of ['from', 'select', 'eq', 'or', 'is', 'order', 'limit']) {
     query[method] = (...args) => { calls.push([method, ...args]); return query; };
   }
   let index = 0;
@@ -409,6 +421,19 @@ test('dead torrents sink below healthy ones whatever their quality', async () =>
   assert.match(result.streams[2].title, /Sin seeders/, 'la ficha avisa de que no hay seeders');
 });
 
+test('at least five seeders form a healthier ranking tier than a high-resolution weak source', async () => {
+  const rows = [
+    { info_hash: hexHash(10), title: 'Movie 4K', seeders: 4 },
+    { info_hash: hexHash(11), title: 'Movie 1080p', seeders: 5 },
+    { info_hash: hexHash(12), title: 'Movie 8K', seeders: 1 },
+    { info_hash: hexHash(13), title: 'Movie 8K', seeders: 0 }
+  ];
+  const result = await streamHandler({ type: 'movie', id: 'tt1234567' }, mock(rows).client);
+  assert.deepEqual(result.streams.map(stream => stream.infoHash), [
+    hexHash(11), hexHash(12), hexHash(10), hexHash(13)
+  ], 'la fuente con al menos cinco seeders va primero; dentro de cada tramo manda la calidad');
+});
+
 test('ranking breaks ties on leechers and finishes on a stable hash order', async () => {
   const rows = [
     { info_hash: hexHash(9), title: 'Movie 1080p Español', seeders: 4, leechers: 8, audio: 'Spanish' },
@@ -435,7 +460,6 @@ test('the response is capped even when the table offers many more sources', asyn
 test('a season scan in memory recovers episodes stored as text', async () => {
   const m = sequenceMock([
     { data: [], error: null },
-    { data: [], error: null },
     { data: [
       { info_hash: hexHash(1), season: '2', episode: '05', title: 'Serie 1080p Español', seeders: 7 },
       { info_hash: hexHash(2), season: '2', episode: 6, title: 'Otro 1080p Español', seeders: 30 },
@@ -445,13 +469,12 @@ test('a season scan in memory recovers episodes stored as text', async () => {
   const result = await streamHandler({ type: 'series', id: 'tt1234567:2:5' }, m.client);
   assert.equal(result.streams.length, 1, 'solo el episodio pedido de la temporada pedida');
   assert.equal(result.streams[0].infoHash, hexHash(1), 'el episode "05" se coteja como 5');
-  assert.equal(m.calls.filter(c => c[0] === 'is').length, 1, 'los packs se intentaron antes de releer la temporada');
+  assert.equal(m.calls.filter(c => c[0] === 'or').length, 1, 'la primera consulta incluye también los packs');
   assert.match(result.streams[0].behaviorHints.bingeGroup, /\|s2\|/, 'el bingeGroup distingue la temporada');
 });
 
 test('the in-memory scan also finds packs whose episode is empty instead of NULL', async () => {
   const m = sequenceMock([
-    { data: [], error: null },
     { data: [], error: null },
     { data: [{ info_hash: hexHash(4), season: 2, episode: '', title: 'Temporada completa 1080p Español', seeders: 12 }], error: null }
   ]);
@@ -463,7 +486,7 @@ test('the in-memory scan also finds packs whose episode is empty instead of NULL
 
 test('the in-memory scan never runs when the exact episode already answered', async () => {
   const m = sequenceMock([
-    { data: [{ info_hash: hexHash(7), title: 'Episodio 1080p Español', seeders: 5 }], error: null }
+    { data: [{ info_hash: hexHash(7), season: 1, episode: 4, title: 'Episodio 1080p Español', seeders: 5 }], error: null }
   ]);
   const result = await streamHandler({ type: 'anime', id: 'tt1234567:1:4' }, m.client);
   assert.equal(result.streams.length, 1);

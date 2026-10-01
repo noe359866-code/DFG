@@ -155,7 +155,11 @@ function healthResponse() {
   return decorate(new Response(JSON.stringify({
     status: 'ok',
     version: addon.manifest.version,
-    supabase,
+    supabase: {
+      configured: supabase.configured,
+      url: supabase.url,
+      key: supabase.keyType === 'none' ? 'missing' : 'present'
+    },
     diagnostic
   }), {
     headers: { 'Content-Type': JSON_TYPE, 'Cache-Control': 'no-store' }
@@ -165,8 +169,8 @@ function healthResponse() {
 async function staticResponse(request, url, env) {
   if (env.ASSETS && typeof env.ASSETS.fetch === 'function') {
     const response = await env.ASSETS.fetch(request);
-    // Un archivo ausente cae al 404 en JSON, como antes: sin caché implícita.
-    if (!response.ok) return jsonResponse({ error: 'No encontrado' }, 404);
+    // 304 (revalidación con If-None-Match) y 206 (Range) son respuestas válidas; solo >=400 es "no encontrado".
+    if (response.status >= 400) return jsonResponse({ error: 'No encontrado' }, 404);
     const cacheControl = url.pathname.startsWith('/assets/') ? ASSET_CACHE_CONTROL : undefined;
     return decorate(response, { 'Cache-Control': cacheControl });
   }

@@ -49,7 +49,8 @@ function configure(overrides) {
   const next = overrides && typeof overrides === 'object' ? {
     SUPABASE_URL: overrides.SUPABASE_URL,
     SUPABASE_ANON_KEY: overrides.SUPABASE_ANON_KEY,
-    SUPABASE_SERVICE_ROLE_KEY: overrides.SUPABASE_SERVICE_ROLE_KEY
+    SUPABASE_SERVICE_ROLE_KEY: overrides.SUPABASE_SERVICE_ROLE_KEY,
+    SUPABASE_TORRENT_COLUMNS: overrides.SUPABASE_TORRENT_COLUMNS
   } : null;
   const changed = JSON.stringify(next) !== JSON.stringify(envOverrides);
   envOverrides = next;
@@ -120,6 +121,9 @@ function getSupabaseClient() {
     supabaseClient = createClient(supabaseUrl, supabaseKey, {
       auth: { persistSession: false, autoRefreshToken: false }
     });
+    if (cleanEnvValue('SUPABASE_SERVICE_ROLE_KEY')) {
+      console.warn('[Supabase] Usando SERVICE_ROLE_KEY (salta RLS). Para solo lectura es preferible SUPABASE_ANON_KEY con una política SELECT en torrents.');
+    }
     return supabaseClient;
   } catch (err) {
     console.error('[Supabase] Error inicializando cliente:', err.message);
@@ -375,9 +379,17 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 // Cuántas filas se piden, cuántas se releen para el cotejo en memoria y cuántas
 // se devuelven. El ranking ordena por calidad e idioma, no por seeders, así que
 // el grupo de candidatos tiene que ser mayor que la respuesta final.
+const QUERY_TIMEOUT_MS = 4000;
 const CANDIDATE_LIMIT = 50;
 const SCAN_LIMIT = 50;
 const MAX_STREAMS = 25;
+
+// Permite reducir el SELECT si el esquema no admite todas las columnas
+// opcionales. La lista se valida para que solo acepte identificadores simples.
+function torrentColumns() {
+  const raw = cleanEnvValue('SUPABASE_TORRENT_COLUMNS');
+  return raw && /^[a-z0-9_,\s*]+$/i.test(raw) ? raw.replace(/\s+/g, '') : '*';
+}
 
 // Hasta 2 intentos por consulta; los errores permanentes (401, sintaxis, RLS)
 // no se reintentan para no duplicar la espera del usuario.
@@ -386,7 +398,7 @@ async function runQuery(query, label) {
   for (let attempt = 1; attempt <= 2; attempt++) {
     const started = Date.now();
     try {
-      const result = await query.abortSignal(AbortSignal.timeout(8000));
+      const result = await query.abortSignal(AbortSignal.timeout(QUERY_TIMEOUT_MS));
       lastResult = result || { data: null, error: new Error('Supabase devolvió una respuesta vacía') };
     } catch (error) {
       // Fallos de transporte/AbortSignal también pueden rechazar la promesa.
@@ -408,14 +420,12 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
   console.log(`[Stream] → type=${type} id=${id}`);
 
   try {
-    // Validación inicial
     if (!id || !manifest.types.includes(type)) {
       console.warn('[Stream] Parámetros faltantes');
       return { streams: [] };
     }
 
     const { imdbId, season, episode } = parseStremioId(id);
-
     if (!imdbId || (type === 'movie' ? season !== null : season === null || episode === null || episode < 1)) {
       console.warn(`[Stream] imdbId inválido: ${imdbId}`);
       return { streams: [] };
@@ -426,41 +436,18 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
       console.error('[Stream] Supabase no configurado - revisa SUPABASE_URL / KEY');
       return { streams: [] };
     }
-    // Construcción de query
-    // select('*') a propósito: la tabla admite varias alternativas por campo
-    // (info_hash/hash, size/size_bytes, audio/lang…) y una lista fija de
-    // columnas haría que PostgREST fallara si alguna no existe. El coste se
-    // acota con el límite, que sube a 50 candidatos porque el orden final
-    // prioriza calidad e idioma mientras la base solo sabe ordenar por
-    // seeders: con 25, el 4K con cuatro seeders se quedaba fuera sin llegar a
-    // valorarse. Lo que sale al usuario se recorta aparte a MAX_STREAMS.
-    let query = supabase
-      .from('torrents')
-      .select('*')
-      .eq('imdb_id', imdbId)
-      .order('seeders', { ascending: false, nullsFirst: false })
-      .limit(CANDIDATE_LIMIT);
 
-    // Para series/anime: filtrar por temporada y episodio si vienen en el ID
     const isSeries = type === 'series' || type === 'anime';
-    if (isSeries && season !== null && episode !== null) {
-      // Soporta columnas como integer o text - probamos con int
-      query = query.eq('season', season).eq('episode', episode);
-      console.log(`[Stream] Filtrando S:${season} E:${episode} para ${imdbId}`);
-    } else if (isSeries && (season !== null || episode !== null)) {
-      // Caso borde: solo uno de los dos (raro) - filtrar lo que tengamos
-      if (season !== null) query = query.eq('season', season);
-      if (episode !== null) query = query.eq('episode', episode);
-    }
-    // Para movie no filtramos season/episode aunque existan nulos en DB
-
+    const columns = torrentColumns();
+    const bySeeders = (query, limit) => query
+      .order('seeders', { ascending: false, nullsFirst: false })
+      .limit(limit);
+    const baseQuery = () => supabase.from('torrents').select(columns).eq('imdb_id', imdbId);
     const mapRows = (rows, packSeason = null) => (Array.isArray(rows) ? rows : [])
       .map(row => {
         if (!row || typeof row !== 'object') return null;
         let infoHash = row.info_hash || row.infoHash || row.hash || null;
         if (infoHash) infoHash = infoHash.toString().trim().toLowerCase();
-        // El magnet se analiza una vez por fila: los tres extractores reciben
-        // la URL ya parseada y no vuelven a construirla.
         const magnet = parseMagnetUrl(row.magnet_url || row.magnetUrl || row.magnet);
         if (!isValidInfoHash(infoHash)) infoHash = extractInfoHashFromMagnet(magnet);
         if (!isValidInfoHash(infoHash)) return null;
@@ -469,82 +456,73 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
       })
       .filter(Boolean);
 
-    const exact = await runQuery(query, `consulta ${imdbId}`);
-    let data = exact.data;
-    if (exact.error) {
-      const error = exact.error;
-      console.error('[Supabase] Error query:', error.message || error.name || 'desconocido', error.details || '');
-      return { streams: [] };
-    }
-    let streamEntries = mapRows(data);
-
-    // Si no hay episodio exacto o sus filas no contienen ningún torrent válido,
-    // intenta packs de temporada: fallback útil ante filas huérfanas/malformadas.
-    if (isSeries && season !== null && episode !== null && streamEntries.length === 0) {
-      console.log(`[Stream] Sin fuente válida del episodio; buscando pack de la temporada ${season} para ${imdbId}`);
-      const packQuery = supabase
-        .from('torrents')
-        .select('*')
-        .eq('imdb_id', imdbId)
-        .eq('season', season)
-        .is('episode', null)
-        .order('seeders', { ascending: false, nullsFirst: false })
-        .limit(10);
-      const pack = await runQuery(packQuery, `pack T${season} ${imdbId}`);
-      if (pack.error) {
-        console.error('[Supabase] Error query pack:', pack.error.message || pack.error.name || 'desconocido', pack.error.details || '');
+    let data = [];
+    let streamEntries = [];
+    if (isSeries) {
+      // Una consulta trae el episodio exacto y los packs de temporada
+      // (episode IS NULL); si PostgREST no encuentra filas, se coteja en memoria.
+      console.log(`[Stream] Filtrando S:${season} E:${episode} para ${imdbId}`);
+      const result = await runQuery(
+        bySeeders(baseQuery().eq('season', season).or(`episode.eq.${episode},episode.is.null`), CANDIDATE_LIMIT),
+        `consulta ${imdbId} S${season}E${episode}`
+      );
+      if (result.error) {
+        const error = result.error;
+        console.error('[Supabase] Error query:', error.message || error.name || 'desconocido', error.details || '');
         return { streams: [] };
       }
-      const packEntries = mapRows(pack.data, season);
-      if (packEntries.length) {
-        data = pack.data;
-        streamEntries = packEntries;
-      }
-    }
 
-    // Último recurso: releer la temporada completa y descartar en memoria todo
-    // lo que no sea el episodio pedido. Resuelve las filas con season/episode
-    // como texto ("2", "05"), que el filtro de PostgREST no encuentra, y los
-    // packs guardados con episode vacío en vez de NULL. El cotejo se hace
-    // siempre aquí, así que no puede colarse un episodio equivocado.
-    if (isSeries && season !== null && episode !== null && streamEntries.length === 0) {
-      console.log(`[Stream] Sigue sin fuente; cotejando la temporada ${season} en memoria para ${imdbId}`);
-      const seasonQuery = supabase
-        .from('torrents')
-        .select('*')
-        .eq('imdb_id', imdbId)
-        .order('seeders', { ascending: false, nullsFirst: false })
-        .limit(SCAN_LIMIT);
-      const scanned = await runQuery(seasonQuery, `temporada ${season} ${imdbId}`);
-      if (scanned.error) {
-        console.error('[Supabase] Error query temporada:', scanned.error.message || scanned.error.name || 'desconocido', scanned.error.details || '');
+      const rows = Array.isArray(result.data) ? result.data : [];
+      const exactRows = rows.filter(row => row && toFiniteNumber(row.episode) === episode);
+      const packRows = rows.filter(row => row && toFiniteNumber(row.episode) === null);
+      streamEntries = mapRows(exactRows);
+      data = exactRows;
+      if (!streamEntries.length) {
+        const packEntries = mapRows(packRows, season);
+        if (packEntries.length) {
+          console.log(`[Stream] Sin fuente válida del episodio; usando pack de la temporada ${season} para ${imdbId}`);
+          data = packRows;
+          streamEntries = packEntries;
+        }
+      }
+
+      if (!streamEntries.length) {
+        // Último recurso: cotejar en memoria por si season/episode vienen con otro tipo.
+        console.log(`[Stream] Sigue sin fuente; cotejando la temporada ${season} en memoria para ${imdbId}`);
+        const scanned = await runQuery(bySeeders(baseQuery(), SCAN_LIMIT), `temporada ${season} ${imdbId}`);
+        if (scanned.error) {
+          console.error('[Supabase] Error query temporada:', scanned.error.message || scanned.error.name || 'desconocido', scanned.error.details || '');
+          return { streams: [] };
+        }
+        const scannedRows = Array.isArray(scanned.data) ? scanned.data : [];
+        const sameSeason = scannedRows.filter(row => row && typeof row === 'object' && toFiniteNumber(row.season) === season);
+        const looseExact = sameSeason.filter(row => toFiniteNumber(row.episode) === episode);
+        const loosePack = looseExact.length ? [] : sameSeason.filter(row => toFiniteNumber(row.episode) === null);
+        const looseEntries = mapRows(looseExact.length ? looseExact : loosePack, looseExact.length ? null : season);
+        if (looseEntries.length) {
+          data = looseExact.length ? looseExact : loosePack;
+          streamEntries = looseEntries;
+          console.log(`[Stream] Recuperadas ${looseEntries.length} fuentes cotejando en memoria (${looseExact.length ? 'episodio exacto' : 'pack de temporada'})`);
+        }
+      }
+    } else {
+      const result = await runQuery(bySeeders(baseQuery(), CANDIDATE_LIMIT), `consulta ${imdbId}`);
+      if (result.error) {
+        const error = result.error;
+        console.error('[Supabase] Error query:', error.message || error.name || 'desconocido', error.details || '');
         return { streams: [] };
       }
-      const rows = Array.isArray(scanned.data) ? scanned.data : [];
-      const sameSeason = rows.filter(row => row && typeof row === 'object' && toFiniteNumber(row.season) === season);
-      const exactRows = sameSeason.filter(row => toFiniteNumber(row.episode) === episode);
-      // Sin episodio exacto solo se aceptan los packs de la temporada: un
-      // capítulo vecino nunca se ofrece como si fuera el pedido.
-      const packRows = exactRows.length ? [] : sameSeason.filter(row => toFiniteNumber(row.episode) === null);
-      const looseEntries = mapRows(exactRows.length ? exactRows : packRows, exactRows.length ? null : season);
-      if (looseEntries.length) {
-        data = exactRows.length ? exactRows : packRows;
-        streamEntries = looseEntries;
-        console.log(`[Stream] Recuperadas ${looseEntries.length} fuentes cotejando en memoria (${exactRows.length ? 'episodio exacto' : 'pack de temporada'})`);
-      }
+      data = Array.isArray(result.data) ? result.data : [];
+      streamEntries = mapRows(data);
     }
 
     if (!streamEntries.length) {
       console.log(`[Stream] Sin fuentes válidas para ${imdbId}${isSeries ? ` S:${season} E:${episode}` : ''}`);
-      // Vacío confirmado y sano: cache corto para evitar repetir consultas.
       return { streams: [], cacheMaxAge: 60 };
     }
     console.log(`[Stream] ${data.length} filas procesadas para ${imdbId} en ${Date.now() - start}ms`);
 
-    // Ordenar de forma determinista: disponibilidad, calidad, idioma, seeders,
-    // leechers y tamaño.
     streamEntries.sort(compareStreamEntries);
-
     const seen = new Set();
     const streams = streamEntries.map(entry => entry.stream).filter(stream => {
       const key = `${stream.infoHash}:${stream.fileIdx ?? ''}`;
@@ -554,10 +532,7 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
     }).slice(0, MAX_STREAMS);
 
     console.log(`[Stream] → Enviando ${streams.length} streams válidos`);
-    // stale-if-error: si una actualización falla en el borde o en el
-    // navegador, se conserva la última respuesta buena durante diez minutos.
     return { streams, cacheMaxAge: 120, staleRevalidate: 600, staleError: 600 };
-
   } catch (err) {
     console.error('[Stream] Excepción no controlada:', err.message, err.stack?.slice(0, 500));
     return { streams: [] };
@@ -572,27 +547,39 @@ function discardInBackground(task) {
 // Tras un fallo de la base de datos no se repite la consulta hasta completar
 // el cooldown: los fallos no se cachean, pero tampoco martillan la base.
 function createCachedStreamHandler(handler, {
-  maxEntries = 250, now = Date.now, keepAlive = discardInBackground, retryDelay = 15000,
+  maxEntries = 250,
+  now = Date.now,
+  keepAlive = discardInBackground,
+  retryDelay = 15000,
   failureCooldown
 } = {}) {
   const cooldownMs = Number.isFinite(failureCooldown) ? failureCooldown : retryDelay;
+  const REFRESH_LOCK_MS = 30000;
   const cache = new Map();
-  const pending = new Map();
+  // Solo guardamos marcas de tiempo, nunca promesas: en Workers una promesa creada
+  // en una request no debe esperarse desde otra ("Cannot perform I/O on behalf of
+  // a different request") y puede quedar colgada si la primera se cancela.
+  const refreshing = new Map();
   const failureUntil = new Map();
+
   function markFailure(key) {
     failureUntil.set(key, now() + cooldownMs);
     while (failureUntil.size > maxEntries) failureUntil.delete(failureUntil.keys().next().value);
   }
-  function refresh(key, args, previous) {
-    if (pending.has(key)) return pending.get(key);
-    const request = Promise.resolve().then(() => handler(args)).then(value => {
+
+  async function load(key, args, previous) {
+    try {
+      const value = await handler(args);
       if (value.cacheMaxAge > 0) {
         const expires = now() + value.cacheMaxAge * 1000;
-        // Los vacíos nunca se sirven obsoletos.
         const staleSeconds = value.streams?.length ? Math.min(value.staleRevalidate || 0, 600) : 0;
         cache.delete(key);
-        cache.set(key, { value: structuredClone(value), expires,
-          staleUntil: expires + staleSeconds * 1000, retryAt: 0 });
+        cache.set(key, {
+          value: structuredClone(value),
+          expires,
+          staleUntil: expires + staleSeconds * 1000,
+          retryAt: 0
+        });
         while (cache.size > maxEntries) cache.delete(cache.keys().next().value);
         failureUntil.delete(key);
       } else {
@@ -600,20 +587,18 @@ function createCachedStreamHandler(handler, {
         markFailure(key);
       }
       return value;
-    }).catch(error => {
+    } catch (error) {
       if (previous) previous.retryAt = now() + retryDelay;
       markFailure(key);
       throw error;
-    }).finally(() => {
-      if (pending.get(key) === request) pending.delete(key);
-    });
-    pending.set(key, request);
-    return request;
+    }
   }
+
   return async function cached(args, requestKeepAlive = keepAlive) {
     const { imdbId, season, episode } = parseStremioId(args?.id);
     if (!imdbId || !manifest.types.includes(args?.type) ||
         (args.type === 'movie' ? season !== null : season === null || episode < 1)) return { streams: [] };
+
     const key = `${args.type}:${imdbId}:${season}:${episode}`;
     const hit = cache.get(key);
     const time = now();
@@ -621,28 +606,28 @@ function createCachedStreamHandler(handler, {
       cache.delete(key);
       cache.set(key, hit);
       const value = structuredClone(hit.value);
-      // No reiniciar el TTL HTTP cada vez que se lee la caché local.
       value.cacheMaxAge = Math.max(0, Math.floor((hit.expires - time) / 1000));
       value.staleRevalidate = Math.max(0, Math.floor((hit.staleUntil - Math.max(time, hit.expires)) / 1000));
-      // stale-if-error del navegador termina junto con la ventana absoluta.
       if (Number.isInteger(value.staleError)) value.staleError = value.staleRevalidate;
-      if (hit.expires <= time && hit.retryAt <= time && !pending.has(key)) {
-        const background = refresh(key, args, hit).catch(() => {});
-        // El Worker mantiene vivo el isolate después de enviar la respuesta
-        // con ctx.waitUntil; en local el trabajo sigue su curso normal.
-        requestKeepAlive(background);
+
+      const lockedAt = refreshing.get(key);
+      const locked = lockedAt !== undefined && time - lockedAt < REFRESH_LOCK_MS;
+      if (hit.expires <= time && hit.retryAt <= time && !locked) {
+        refreshing.set(key, time);
+        requestKeepAlive(
+          load(key, args, hit).catch(() => {}).finally(() => refreshing.delete(key))
+        );
       }
       return value;
     }
+
     cache.delete(key);
-    // Entradas obsoletas ya caducadas sí se sirven arriba; aquí solo frenamos
-    // consultas nuevas mientras dure el cooldown de un fallo reciente.
     const failedUntil = failureUntil.get(key);
     if (failedUntil !== undefined) {
       if (failedUntil > time) return { streams: [] };
       failureUntil.delete(key);
     }
-    return structuredClone(await refresh(key, args));
+    return structuredClone(await load(key, args));
   };
 }
 // Singleton compartido: la interfaz del SDK y el Worker usan la misma caché.
@@ -687,13 +672,14 @@ function resolutionWeight(tag) {
   return 0;
 }
 
-// Orden de preferencia. Lo primero es que la fuente esté viva: un 4K sin
-// seeders no reproduce, así que baja por debajo de cualquier fuente sana sea
-// cual sea su calidad. Después manda la calidad, luego el idioma, y solo dentro
-// de un mismo tramo la disponibilidad. El hash al final fija un orden estable:
-// dos peticiones idénticas devuelven la misma lista, byte a byte.
+// Antes de calidad, se separan las fuentes con al menos cinco seeders de las
+// que tienen pocos o ninguno: una opción muy alta pero casi sin pares no debe
+// encabezar una fuente 1080p mucho más disponible. El hash fija el orden final.
+const HEALTHY_SEEDERS = 5;
+const healthTier = seeders => seeders >= HEALTHY_SEEDERS ? 2 : seeders > 0 ? 1 : 0;
+
 function compareStreamEntries(a, b) {
-  const health = (b.seeders > 0 ? 1 : 0) - (a.seeders > 0 ? 1 : 0);
+  const health = healthTier(b.seeders) - healthTier(a.seeders);
   if (health !== 0) return health;
 
   const resDiff = resolutionWeight(b.resolution) - resolutionWeight(a.resolution);
@@ -794,4 +780,4 @@ function buildStream(row, infoHash, magnetTrackers = [], imdbId = '') {
 const addonInterface = builder.getInterface();
 module.exports = addonInterface;
 
-module.exports.helpers = { parseStremioId, getLanguageTag, getResolutionTag, detectLanguageTag, formatSizeGB, parseSizeBytes, extractInfoHashFromMagnet, extractTrackersFromMagnet, extractTitleFromMagnet, sanitizeOneLine, buildStreamEntry, compareStreamEntries, streamHandler, createCachedStreamHandler, cachedStreamHandler, getSupabaseClient, configure, configStatus, normalizeSupabaseUrl, cleanEnvValue };
+module.exports.helpers = { parseStremioId, getLanguageTag, getResolutionTag, detectLanguageTag, formatSizeGB, parseSizeBytes, extractInfoHashFromMagnet, extractTrackersFromMagnet, extractTitleFromMagnet, sanitizeOneLine, buildStreamEntry, compareStreamEntries, streamHandler, createCachedStreamHandler, cachedStreamHandler, getSupabaseClient, configure, configStatus, normalizeSupabaseUrl, cleanEnvValue, torrentColumns };
