@@ -500,3 +500,50 @@ test('movie binge groups do not invent a season', async () => {
     mock([{ info_hash: hexHash(8), title: 'Movie 1080p', seeders: 2 }]).client);
   assert.match(result.streams[0].behaviorHints.bingeGroup, /\|movie\|/);
 });
+
+
+test('language detection does not treat common Spanish/English words as language tags', () => {
+  assert.equal(addon.helpers.detectLanguageTag('El episodio es en HD'), null);
+  assert.equal(addon.helpers.detectLanguageTag('Movie in a city'), null);
+  assert.equal(addon.helpers.detectLanguageTag('Audio es-ES'), 'ESP');
+  assert.equal(addon.helpers.detectLanguageTag('Audio en-US'), 'ENG');
+});
+
+test('file_index is exposed as the Stremio fileIdx', () => {
+  const entry = addon.helpers.buildStreamEntry({
+    info_hash: hexHash(30),
+    file_index: '7',
+    title: 'Movie 1080p Español',
+    seeders: 8
+  }, hexHash(30), [], 'tt1234567');
+  assert.equal(entry.stream.fileIdx, 7);
+});
+
+test('info_hash_clean is preferred when available', () => {
+  const entry = addon.helpers.buildStreamEntry({
+    info_hash: 'INVALID',
+    info_hash_clean: hexHash(31),
+    title: 'Movie 1080p Español',
+    seeders: 8
+  }, hexHash(31), [], 'tt1234567');
+  assert.equal(entry.stream.infoHash, hexHash(31));
+});
+
+test('anime can recover a source by absolute_episode', async () => {
+  const m = sequenceMock([
+    { data: [], error: null },
+    { data: [{ info_hash: hexHash(32), type: 'anime', absolute_episode: 25, title: 'Anime 1080p Japonés Sub', seeders: 8 }], error: null }
+  ]);
+  const result = await addon.helpers.streamHandler({ type: 'anime', id: 'tt1234567:1:25' }, m.client);
+  assert.equal(result.streams.length, 1);
+  assert.equal(result.streams[0].infoHash, hexHash(32));
+  assert.ok(m.calls.some(c => c[0] === 'eq' && c[1] === 'absolute_episode' && c[2] === 25));
+});
+
+test('stream queries include the requested content type', async () => {
+  const m = sequenceMock([
+    { data: [{ info_hash: hexHash(33), type: 'movie', title: 'Movie 1080p Español', seeders: 5 }], error: null }
+  ]);
+  await addon.helpers.streamHandler({ type: 'movie', id: 'tt1234567' }, m.client);
+  assert.ok(m.calls.some(c => c[0] === 'eq' && c[1] === 'type' && c[2] === 'movie'));
+});
