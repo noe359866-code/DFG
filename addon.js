@@ -144,10 +144,14 @@ function getSupabaseClient() {
 function parseStremioId(id) {
   const empty = { imdbId: null, season: null, episode: null };
   if (typeof id !== 'string') return empty;
-  const match = /^(tt\d{7,10})(?::(\d{1,4}):(\d{1,5}))?$/.exec(id);
+  const value = id.trim();
+  const match = /^(tt\d{7,10})(?::(\d{1,4}):(\d{1,5}))?$/.exec(value);
   if (!match) return empty;
-  return { imdbId: match[1], season: match[2] === undefined ? null : Number(match[2]),
-    episode: match[3] === undefined ? null : Number(match[3]) };
+  const season = match[2] === undefined ? null : Number(match[2]);
+  const episode = match[3] === undefined ? null : Number(match[3]);
+  if ((season !== null && !Number.isSafeInteger(season)) ||
+      (episode !== null && !Number.isSafeInteger(episode))) return empty;
+  return { imdbId: match[1], season, episode };
 }
 
 function isValidInfoHash(hash) {
@@ -319,8 +323,10 @@ function detectLanguageTag(text) {
   if (typeof text !== 'string' || !text.trim()) return null;
   const lower = text.toLowerCase();
   const has = pattern => pattern.test(lower);
-  const spanish = has(/\b(es|esp|español|spanish|castellano|cast|latino|lat|latam|latinoamérica)\b/);
-  const english = has(/\b(en|eng|english|inglés|ingles)\b/);
+  const spanish = has(/\b(esp|español|spanish|castellano|cast|latino|lat|latam|latinoamérica)\b/) ||
+    has(/\bes[-_](?:es|mx|419|ar|cl|co|pe)\b/);
+  const english = has(/\b(eng|english|inglés|ingles)\b/) ||
+    has(/\ben[-_](?:us|gb|au|ca)\b/);
   if (has(/\b(dual|multi|dual-sub)\b/) || (spanish && english)) return 'DUAL';
   if (has(/\b(vose|vos|subtitulado)\b/)) return 'VOSE';
   // Audio foreign con subtítulos o subtítulos sampled: no es un idioma concreto.
@@ -442,11 +448,11 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
     const bySeeders = (query, limit) => query
       .order('seeders', { ascending: false, nullsFirst: false })
       .limit(limit);
-    const baseQuery = () => supabase.from('torrents').select(columns).eq('imdb_id', imdbId);
+    const baseQuery = () => supabase.from('torrents').select(columns).eq('imdb_id', imdbId).eq('type', type);
     const mapRows = (rows, packSeason = null) => (Array.isArray(rows) ? rows : [])
       .map(row => {
         if (!row || typeof row !== 'object') return null;
-        let infoHash = row.info_hash || row.infoHash || row.hash || null;
+        let infoHash = row.info_hash_clean || row.info_hash || row.infoHash || row.hash || null;
         if (infoHash) infoHash = infoHash.toString().trim().toLowerCase();
         const magnet = parseMagnetUrl(row.magnet_url || row.magnetUrl || row.magnet);
         if (!isValidInfoHash(infoHash)) infoHash = extractInfoHashFromMagnet(magnet);
@@ -486,6 +492,18 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
         }
       }
 
+      if (!streamEntries.length && type === 'anime') {
+        const absoluteResult = await runQuery(
+          bySeeders(baseQuery().eq('absolute_episode', episode), CANDIDATE_LIMIT),
+          'anime absoluto E' + episode + ' ' + imdbId
+        );
+        if (!absoluteResult.error) {
+          const absoluteRows = Array.isArray(absoluteResult.data) ? absoluteResult.data : [];
+          streamEntries = mapRows(absoluteRows);
+          data = absoluteRows;
+        }
+      }
+
       if (!streamEntries.length) {
         // Último recurso: cotejar en memoria por si season/episode vienen con otro tipo.
         console.log(`[Stream] Sigue sin fuente; cotejando la temporada ${season} en memoria para ${imdbId}`);
@@ -495,10 +513,19 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
           return { streams: [] };
         }
         const scannedRows = Array.isArray(scanned.data) ? scanned.data : [];
-        const sameSeason = scannedRows.filter(row => row && typeof row === 'object' && toFiniteNumber(row.season) === season);
+        const typedRows = scannedRows.filter(row => row && typeof row === 'object' &&
+          (!row.type || String(row.type).toLowerCase() === type));
+        const sameSeason = typedRows.filter(row => toFiniteNumber(row.season) === season);
         const looseExact = sameSeason.filter(row => toFiniteNumber(row.episode) === episode);
-        const loosePack = looseExact.length ? [] : sameSeason.filter(row => toFiniteNumber(row.episode) === null);
-        const looseEntries = mapRows(looseExact.length ? looseExact : loosePack, looseExact.length ? null : season);
+        const absoluteExact = type === 'anime'
+          ? typedRows.filter(row => toFiniteNumber(row.absolute_episode) === episode)
+          : [];
+        const selectedExact = looseExact.length ? looseExact : absoluteExact;
+        const loosePack = selectedExact.length ? [] : sameSeason.filter(row => toFiniteNumber(row.episode) === null);
+        const looseEntries = mapRows(
+          selectedExact.length ? selectedExact : loosePack,
+          selectedExact.length ? null : season
+        );
         if (looseEntries.length) {
           data = looseExact.length ? looseExact : loosePack;
           streamEntries = looseEntries;
@@ -678,26 +705,59 @@ function resolutionWeight(tag) {
 const HEALTHY_SEEDERS = 5;
 const healthTier = seeders => seeders >= HEALTHY_SEEDERS ? 2 : seeders > 0 ? 1 : 0;
 
+function numericNonNegative(value) {
+  const number = toFiniteNumber(value);
+  return number === null || number < 0 ? 0 : number;
+}
+
+const QUALITY_WEIGHT = {
+  '8K': 100, '4K': 90, '1440p': 80, '1080p': 70,
+  '720p': 55, '576p': 40, '480p': 30, '360p': 20
+};
+const CODEC_WEIGHT = { av1: 8, hevc: 7, h265: 7, x265: 7, h264: 5, x264: 5, vp9: 4 };
+const HDR_WEIGHT = { 'dolby vision': 8, dolbyvision: 8, 'dv': 7, 'hdr10+': 7, hdr10: 6, hdr: 5, sdr: 0 };
+
+function textLower(value) {
+  return typeof value === 'string' ? value.toLowerCase() : '';
+}
+
+function metadataScore(entry) {
+  const row = entry?.row || {};
+  const resolutionScore = QUALITY_WEIGHT[entry.resolution] ?? 0;
+  const langScore = LANGUAGE_WEIGHT[entry.langTag] ?? 0;
+  const codec = textLower(row.codec || row.video_codec);
+  const hdr = textLower(row.hdr_format || row.hdr);
+  const codecScore = Object.entries(CODEC_WEIGHT).reduce((best, [token, weight]) =>
+    codec.includes(token) ? Math.max(best, weight) : best, 0);
+  const hdrScore = Object.entries(HDR_WEIGHT).reduce((best, [token, weight]) =>
+    hdr.includes(token) ? Math.max(best, weight) : best, 0);
+  const audioText = textLower(Array.isArray(row.audio) ? row.audio.join(' ') : row.audio);
+  const audioScore = /atmos|truehd|dts-hd|dts:x/.test(audioText) ? 5 :
+    /aac|ac3|eac3|ddp|dolby/.test(audioText) ? 3 : 0;
+  const subtitleScore = row.subtitles || row.subs ? 1 : 0;
+  const seedScore = Math.min(numericNonNegative(entry.seeders), 50);
+  const leecherPenalty = entry.leecherCount === null ? 0 :
+    Math.min(numericNonNegative(entry.leecherCount), 20) * 0.25;
+  return resolutionScore + langScore + codecScore + hdrScore + audioScore +
+    subtitleScore + seedScore * 0.4 - leecherPenalty;
+}
+
 function compareStreamEntries(a, b) {
+  // La disponibilidad sigue siendo un filtro duro: una fuente sin pares no
+  // debe desplazar una fuente saludable solo por tener más resolución.
   const health = healthTier(b.seeders) - healthTier(a.seeders);
   if (health !== 0) return health;
 
-  const resDiff = resolutionWeight(b.resolution) - resolutionWeight(a.resolution);
-  if (resDiff !== 0) return resDiff;
-
-  const langDiff = (LANGUAGE_WEIGHT[b.langTag] ?? 0) - (LANGUAGE_WEIGHT[a.langTag] ?? 0);
-  if (langDiff !== 0) return langDiff;
+  const scoreDiff = metadataScore(b) - metadataScore(a);
+  if (Math.abs(scoreDiff) > 0.0001) return scoreDiff;
 
   const seederDiff = b.seeders - a.seeders;
   if (seederDiff !== 0) return seederDiff;
-
   if (a.leecherCount !== b.leecherCount) {
-    // Sin leechers declarados seisitúa al final del tramo, no en el primero.
     if (a.leecherCount === null) return 1;
     if (b.leecherCount === null) return -1;
     return a.leecherCount - b.leecherCount;
   }
-
   if (b.sizeBytes !== a.sizeBytes) return b.sizeBytes - a.sizeBytes;
   return a.infoHash < b.infoHash ? -1 : a.infoHash > b.infoHash ? 1 : 0;
 }
@@ -739,7 +799,7 @@ function buildStreamEntry(row, infoHash, magnetTrackers = [], imdbId = '', magne
   // trackers, con fallback a trackers públicos de alta disponibilidad.
   const trackers = buildTrackers(row.trackers, magnetTrackers);
 
-  const rawFileIdx = row.file_idx ?? row.fileIdx;
+  const rawFileIdx = row.file_index ?? row.file_idx ?? row.fileIndex ?? row.fileIdx;
   const numericFileIdx = rawFileIdx === '' || rawFileIdx === null || rawFileIdx === undefined ? NaN : Number(rawFileIdx);
   const fileIdx = Number.isSafeInteger(numericFileIdx) && numericFileIdx >= 0 ? numericFileIdx : undefined;
 
@@ -766,7 +826,8 @@ function buildStreamEntry(row, infoHash, magnetTrackers = [], imdbId = '', magne
     seeders,
     leecherCount: leecherCount === null || leecherCount < 0 ? null : leecherCount,
     sizeBytes: sizeBytes || 0,
-    infoHash: infoHash.toLowerCase()
+    infoHash: infoHash.toLowerCase(),
+    row: metadata
   };
 }
 
@@ -780,4 +841,4 @@ function buildStream(row, infoHash, magnetTrackers = [], imdbId = '') {
 const addonInterface = builder.getInterface();
 module.exports = addonInterface;
 
-module.exports.helpers = { parseStremioId, getLanguageTag, getResolutionTag, detectLanguageTag, formatSizeGB, parseSizeBytes, extractInfoHashFromMagnet, extractTrackersFromMagnet, extractTitleFromMagnet, sanitizeOneLine, buildStreamEntry, compareStreamEntries, streamHandler, createCachedStreamHandler, cachedStreamHandler, getSupabaseClient, configure, configStatus, normalizeSupabaseUrl, cleanEnvValue, torrentColumns };
+module.exports.helpers = { numericNonNegative, metadataScore, parseStremioId, getLanguageTag, getResolutionTag, detectLanguageTag, formatSizeGB, parseSizeBytes, extractInfoHashFromMagnet, extractTrackersFromMagnet, extractTitleFromMagnet, sanitizeOneLine, buildStreamEntry, compareStreamEntries, streamHandler, createCachedStreamHandler, cachedStreamHandler, getSupabaseClient, configure, configStatus, normalizeSupabaseUrl, cleanEnvValue, torrentColumns };
