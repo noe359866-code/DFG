@@ -6,3 +6,7 @@ SUPABASE_URL=https://xxxxxxxx.supabase.co
 # Preferir ANON con RLS de lectura. SERVICE_ROLE solo en servidor, si es necesario.
 SUPABASE_ANON_KEY=tu_clave_anon
 # SUPABASE_SERVICE_ROLE_KEY=tu_clave_privada
+
+# Opcional: lista de columnas separada por comas (por defecto, todas las columnas).
+# Incluye al menos los campos que utiliza el addon si restringes el SELECT.
+# SUPABASE_TORRENT_COLUMNS=imdb_id,season,episode,info_hash,magnet_url,seeders,title

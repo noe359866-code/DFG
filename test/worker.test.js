@@ -136,6 +136,16 @@ test('static assets are served through the ASSETS binding with one day of cache'
   const missing = await fetchWorker('/assets/missing.png', { env: { ASSETS: assets } });
   assert.equal(missing.status, 404);
   assert.deepEqual(await missing.json(), { error: 'No encontrado' });
+
+  const notModified = await fetchWorker('/assets/brand.png', {
+    env: { ASSETS: { fetch: async () => new Response(null, { status: 304, headers: { ETag: '"asset"' } }) } }
+  });
+  assert.equal(notModified.status, 304, '304 de estáticos es una revalidación válida, no un 404');
+  assert.equal(notModified.headers.get('etag'), '"asset"');
+  const partial = await fetchWorker('/assets/brand.png', {
+    env: { ASSETS: { fetch: async () => new Response('contenido parcial', { status: 206 }) } }
+  });
+  assert.equal(partial.status, 206, '206 de estáticos es válido para peticiones Range');
 });
 
 test('health never announces cache and the worker configures Supabase from env', async () => {
@@ -144,8 +154,8 @@ test('health never announces cache and the worker configures Supabase from env',
   assert.equal(health.headers.get('cache-control'), 'no-store');
   const bare = await health.json();
   assert.equal(bare.version, addon.manifest.version);
-  assert.deepEqual(bare.supabase, { configured: false, url: 'missing', keyType: 'none' },
-    '/health diagnostica las variables sin exponer sus valores');
+  assert.deepEqual(bare.supabase, { configured: false, url: 'missing', key: 'missing' },
+    '/health resume la presencia de la clave sin exponer su tipo ni valor');
   assert.deepEqual(bare.diagnostic, {
     code: 'SUPABASE_URL_MISSING',
     message: 'Define SUPABASE_URL en los secretos del despliegue.'
@@ -153,7 +163,7 @@ test('health never announces cache and the worker configures Supabase from env',
 
   const injected = await fetchWorker('/health', { env: { SUPABASE_URL: 'https://example.supabase.co', SUPABASE_ANON_KEY: 'anon' } });
   const healthyConfig = await injected.json();
-  assert.deepEqual(healthyConfig.supabase, { configured: true, url: 'ok', keyType: 'anon' });
+  assert.deepEqual(healthyConfig.supabase, { configured: true, url: 'ok', key: 'present' });
   assert.equal(healthyConfig.diagnostic.code, 'CONFIG_PRESENT');
   assert.match(healthyConfig.diagnostic.message, /no comprueba la conexión/);
   const client = addon.helpers.getSupabaseClient();
