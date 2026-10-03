@@ -1,7 +1,13 @@
 # Despliegue en Cloudflare Workers. Los secretos NO van aquí: se configuran
 # con `npx wrangler secret put SUPABASE_URL` (y SUPABASE_ANON_KEY /
 # SUPABASE_SERVICE_ROLE_KEY) o en `.dev.vars` para `wrangler dev` local.
-name = "nexo-play"
+#
+# `name` DEBE coincidir con el Worker que existe en el panel de Cloudflare
+# (Workers & Pages → nexo-player-app). Workers Builds comprueba esta
+# coincidencia en cada deploy y, con `npm run deploy` manual, un nombre
+# distinto crearía un segundo Worker en lugar de actualizar el que está en
+# producción.
+name = "nexo-player-app"
 main = "worker.mjs"
 compatibility_date = "2026-09-29"
 compatibility_flags = ["nodejs_compat"]

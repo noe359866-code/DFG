@@ -86,6 +86,15 @@ npm run tail       # registros en vivo del Worker desplegado
 
 En producción, los secretos no van en `wrangler.toml`: usa `npx wrangler secret put SUPABASE_URL` (y `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY`). El empaquetado se puede validar sin desplegar con `npx wrangler deploy --dry-run`.
 
+### Despliegue automático (Workers Builds)
+
+El repositorio está conectado a Cloudflare Workers Builds: cada push a `main` publica el Worker `nexo-player-app` y cada rama genera un Preview. Para que funcione:
+
+- `name` en `wrangler.toml` debe ser exactamente el nombre del Worker del panel (`nexo-player-app`). Si no coincide, Workers Builds lo marca como error de nombre y `npm run deploy` crearía un Worker distinto.
+- En el panel (Worker → *Settings* → *Build*): **Build command** vacío (o `npm test`), **Deploy command** = `npx wrangler deploy` y **Non-production branch deploy command** = `npx wrangler preview` o `npx wrangler versions upload`. Un `npx wrangler preview` en producción nunca actualiza el sitio vivo.
+- Los secretos (`SUPABASE_URL`, `SUPABASE_ANON_KEY`) se definen en *Settings* → *Variables and Secrets* del Worker; los Preview no los heredan.
+- Si un build falla, el log está en *Deployments* → *View build* del Worker; el check `Workers Builds: nexo-player-app` del commit en GitHub enlaza directamente a él.
+
 ```sh
 npm test
 npm run test:manifest
