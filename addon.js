@@ -598,9 +598,13 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
     const bestByLanguage = [];
     let spanishSelected = false;
     let englishSelected = false;
+    let dualSelected = false;
 
+    // Prioridad: español + inglés. Si no existe español, DUAL actúa como
+    // sustituto del español para no dejar al usuario sin una opción equivalente.
     for (const entry of uniqueEntries) {
       const language = entry.langTag;
+
       if ((language === 'ESP' || language === 'LAT' || language === 'CAST') && !spanishSelected) {
         bestByLanguage.push(entry);
         spanishSelected = true;
@@ -608,10 +612,26 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
         bestByLanguage.push(entry);
         englishSelected = true;
       }
+
       if (bestByLanguage.length === MAX_LANGUAGE_STREAMS) break;
     }
 
-    const streams = bestByLanguage.map(entry => entry.stream);
+    // Solo usamos DUAL si realmente no encontramos ningún español.
+    if (!spanishSelected) {
+      const dualEntry = uniqueEntries.find(entry => entry.langTag === 'DUAL');
+      if (dualEntry) {
+        // Si ya hay inglés, DUAL ocupa el lugar del español.
+        if (englishSelected) {
+          bestByLanguage.unshift(dualEntry);
+        } else {
+          bestByLanguage.push(dualEntry);
+        }
+        dualSelected = true;
+      }
+    }
+
+    // Garantiza como máximo dos resultados incluso cuando DUAL se añade como fallback.
+    const streams = bestByLanguage.slice(0, MAX_LANGUAGE_STREAMS).map(entry => entry.stream);
 
     console.log(`[Stream] → Enviando ${streams.length} streams válidos`);
     return { streams, cacheMaxAge: 120, staleRevalidate: 600, staleError: 600 };
