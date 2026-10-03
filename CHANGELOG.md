@@ -8,7 +8,7 @@
 - **Datos heterogéneos:** se aceptan arrays de audio y campos alternativos (`languages`, `audio_language`, `original_language`) para bases importadas desde distintas fuentes.
 - **Ranking refinado:** WEB-DL, WEBRip, BluRay, BDRip y HDTV aportan una señal secundaria después de disponibilidad, resolución e idioma; codec, HDR, audio y subtítulos siguen participando.
 - **Ranking más eficiente:** la puntuación de cada fuente se calcula una sola vez antes del `sort`, evitando repetir el análisis de codec/HDR/audio/formato en cada comparación.
-- **Selección de streams:** la respuesta queda limitada a los dos mejores candidatos: uno en español (ESP/LAT/CAST) y uno en inglés (ENG); no se envían listas largas de fuentes repetidas.
+- **Selección de streams:** la respuesta queda limitada a los dos mejores candidatos: uno en español (ESP/LAT/CAST) y uno en inglés (ENG). Si no existe español, el mejor `DUAL` se usa como fallback para no dejar vacía la opción de español.
 - **Logs de depuración opcionales:** los logs de flujo de nivel informativo quedan desactivados por defecto y se pueden activar con `DFG_DEBUG=1`; los avisos y errores operativos se mantienen.
 - **Procesamiento estable:** se mantienen la validación de BTIH, saneamiento de texto, normalización de trackers, deduplicación por hash+archivo y límites de candidatos/streams.
 - **Pruebas:** se añadieron regresiones para ISO, audio como array, combinación de idiomas y selección entre formatos equivalentes.
