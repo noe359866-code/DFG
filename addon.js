@@ -50,7 +50,8 @@ function configure(overrides) {
     SUPABASE_URL: overrides.SUPABASE_URL,
     SUPABASE_ANON_KEY: overrides.SUPABASE_ANON_KEY,
     SUPABASE_SERVICE_ROLE_KEY: overrides.SUPABASE_SERVICE_ROLE_KEY,
-    SUPABASE_TORRENT_COLUMNS: overrides.SUPABASE_TORRENT_COLUMNS
+    SUPABASE_TORRENT_COLUMNS: overrides.SUPABASE_TORRENT_COLUMNS,
+    DFG_DEBUG: overrides.DFG_DEBUG
   } : null;
   const changed = JSON.stringify(next) !== JSON.stringify(envOverrides);
   envOverrides = next;
@@ -70,6 +71,15 @@ function envValue(name) {
 function isPlaceholderValue(value) {
   const text = value.toLowerCase();
   return text.startsWith('tu_') || text.includes('xxxxxxxx') || text === 'changeme';
+}
+
+function debugEnabled() {
+  const value = cleanEnvValue('DFG_DEBUG');
+  return value === '1' || /^(true|yes|on)$/i.test(value || '');
+}
+
+function debugLog(...args) {
+  if (debugEnabled()) console.log(...args);
 }
 
 function cleanEnvValue(name) {
@@ -314,22 +324,40 @@ function formatSizeGB(row) {
 // su título sí declara el idioma. Antes solo se miraba la primera fuente y esas
 // filas quedaban como N/D.
 // ---------------------------------------------------------------------------
+function flattenLanguageValue(value) {
+  if (Array.isArray(value)) return value.filter(Boolean).join(' ');
+  if (value === null || value === undefined) return '';
+  return String(value);
+}
+
 const LANGUAGE_SOURCES = row => [
-  [row.audio, row.language, row.lang].filter(Boolean).join(' '),
+  [
+    row.audio, row.language, row.lang, row.languages,
+    row.audio_language, row.original_language
+  ].map(flattenLanguageValue).filter(Boolean).join(' '),
   row.release_name, row.title, row.name
 ];
 
 function detectLanguageTag(text) {
   if (typeof text !== 'string' || !text.trim()) return null;
-  const lower = text.toLowerCase();
+  const lower = text.trim().toLowerCase();
   const has = pattern => pattern.test(lower);
-  const spanish = has(/\b(esp|español|spanish|castellano|cast|latino|lat|latam|latinoamérica)\b/) ||
+
+  // Los códigos ISO exactos solo se aceptan como tokens completos. Esto evita
+  // confundir palabras como "es" dentro de títulos, pero permite language=es
+  // y lang=en, un formato habitual en tablas importadas.
+  const spanishIso = /(?:^|[\s,;|/()[\]_-])(?:es|spa|es-es|es-mx|es-419|es-ar|es-cl|es-co|es-pe)(?:$|[\s,;|/()[\]_-])/.test(lower);
+  const englishIso = /(?:^|[\s,;|/()[\]_-])(?:en|eng|en-us|en-gb|en-au|en-ca)(?:$|[\s,;|/()[\]_-])/.test(lower);
+
+  const spanish = spanishIso ||
+    has(/\b(esp|español|spanish|castellano|cast|latino|lat|latam|latinoamérica)\b/) ||
     has(/\bes[-_](?:es|mx|419|ar|cl|co|pe)\b/);
-  const english = has(/\b(eng|english|inglés|ingles)\b/) ||
+  const english = englishIso ||
+    has(/\b(eng|english|inglés|ingles)\b/) ||
     has(/\ben[-_](?:us|gb|au|ca)\b/);
+
   if (has(/\b(dual|multi|dual-sub)\b/) || (spanish && english)) return 'DUAL';
   if (has(/\b(vose|vos|subtitulado)\b/)) return 'VOSE';
-  // Audio foreign con subtítulos o subtítulos sampled: no es un idioma concreto.
   if (has(/\b(vost|vostfr|vosto|vosteng)\b/)) return 'VOST';
   if (has(/\b(sub|subt|subsample)\b/)) return 'SUB';
   if (has(/\b(castellano|cast)\b/)) return 'CAST';
@@ -388,7 +416,8 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const QUERY_TIMEOUT_MS = 4000;
 const CANDIDATE_LIMIT = 50;
 const SCAN_LIMIT = 50;
-const MAX_STREAMS = 25;
+const MAX_STREAMS = 2;
+const MAX_LANGUAGE_STREAMS = 2;
 
 // Permite reducir el SELECT si el esquema no admite todas las columnas
 // opcionales. La lista se valida para que solo acepte identificadores simples.
@@ -549,14 +578,60 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
     }
     console.log(`[Stream] ${data.length} filas procesadas para ${imdbId} en ${Date.now() - start}ms`);
 
+    // Calcula la puntuación una sola vez antes de ordenar. El comparador puede
+    // ejecutarse decenas de veces; precomputarla evita repetir detección de
+    // codec/HDR/audio/formato para cada comparación.
+    for (const entry of streamEntries) entry.rankingScore = metadataScore(entry);
     streamEntries.sort(compareStreamEntries);
     const seen = new Set();
-    const streams = streamEntries.map(entry => entry.stream).filter(stream => {
+    const uniqueEntries = streamEntries.filter(entry => {
+      const stream = entry.stream;
       const key = `${stream.infoHash}:${stream.fileIdx ?? ''}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
-    }).slice(0, MAX_STREAMS);
+    });
+
+    // Respuesta pequeña y predecible: como máximo un candidato en español y
+    // uno en inglés. Como uniqueEntries ya está ordenado por calidad, el primer
+    // candidato de cada idioma es el mejor disponible.
+    const bestByLanguage = [];
+    let spanishSelected = false;
+    let englishSelected = false;
+    let dualSelected = false;
+
+    // Prioridad: español + inglés. Si no existe español, DUAL actúa como
+    // sustituto del español para no dejar al usuario sin una opción equivalente.
+    for (const entry of uniqueEntries) {
+      const language = entry.langTag;
+
+      if ((language === 'ESP' || language === 'LAT' || language === 'CAST') && !spanishSelected) {
+        bestByLanguage.push(entry);
+        spanishSelected = true;
+      } else if (language === 'ENG' && !englishSelected) {
+        bestByLanguage.push(entry);
+        englishSelected = true;
+      }
+
+      if (bestByLanguage.length === MAX_LANGUAGE_STREAMS) break;
+    }
+
+    // Solo usamos DUAL si realmente no encontramos ningún español.
+    if (!spanishSelected) {
+      const dualEntry = uniqueEntries.find(entry => entry.langTag === 'DUAL');
+      if (dualEntry) {
+        // Si ya hay inglés, DUAL ocupa el lugar del español.
+        if (englishSelected) {
+          bestByLanguage.unshift(dualEntry);
+        } else {
+          bestByLanguage.push(dualEntry);
+        }
+        dualSelected = true;
+      }
+    }
+
+    // Garantiza como máximo dos resultados incluso cuando DUAL se añade como fallback.
+    const streams = bestByLanguage.slice(0, MAX_LANGUAGE_STREAMS).map(entry => entry.stream);
 
     console.log(`[Stream] → Enviando ${streams.length} streams válidos`);
     return { streams, cacheMaxAge: 120, staleRevalidate: 600, staleError: 600 };
@@ -714,6 +789,13 @@ const QUALITY_WEIGHT = {
   '8K': 100, '4K': 90, '1440p': 80, '1080p': 70,
   '720p': 55, '576p': 40, '480p': 30, '360p': 20
 };
+
+// Puntuación secundaria para metadatos que no cambian la resolución, pero sí
+// ayudan a elegir una fuente reproducible cuando dos releases son equivalentes.
+const FORMAT_TOKENS = Object.freeze({
+  'web-dl': 7, 'webdl': 7, 'web rip': 6, 'webrip': 6, 'bluray': 6,
+  'brrip': 5, 'hdtv': 4, 'dvdrip': 2
+});
 const CODEC_WEIGHT = { av1: 8, hevc: 7, h265: 7, x265: 7, h264: 5, x264: 5, vp9: 4 };
 const HDR_WEIGHT = { 'dolby vision': 8, dolbyvision: 8, 'dv': 7, 'hdr10+': 7, hdr10: 6, hdr: 5, sdr: 0 };
 
@@ -735,11 +817,14 @@ function metadataScore(entry) {
   const audioScore = /atmos|truehd|dts-hd|dts:x/.test(audioText) ? 5 :
     /aac|ac3|eac3|ddp|dolby/.test(audioText) ? 3 : 0;
   const subtitleScore = row.subtitles || row.subs ? 1 : 0;
+  const formatText = textLower(row.source || row.format || row.quality);
+  const formatScore = Object.entries(FORMAT_TOKENS).reduce((best, [token, weight]) =>
+    formatText.includes(token) ? Math.max(best, weight) : best, 0);
   const seedScore = Math.min(numericNonNegative(entry.seeders), 50);
   const leecherPenalty = entry.leecherCount === null ? 0 :
     Math.min(numericNonNegative(entry.leecherCount), 20) * 0.25;
   return resolutionScore + langScore + codecScore + hdrScore + audioScore +
-    subtitleScore + seedScore * 0.4 - leecherPenalty;
+    subtitleScore + formatScore + seedScore * 0.4 - leecherPenalty;
 }
 
 function compareStreamEntries(a, b) {
@@ -748,7 +833,7 @@ function compareStreamEntries(a, b) {
   const health = healthTier(b.seeders) - healthTier(a.seeders);
   if (health !== 0) return health;
 
-  const scoreDiff = metadataScore(b) - metadataScore(a);
+  const scoreDiff = (b.rankingScore ?? metadataScore(b)) - (a.rankingScore ?? metadataScore(a));
   if (Math.abs(scoreDiff) > 0.0001) return scoreDiff;
 
   const seederDiff = b.seeders - a.seeders;
@@ -841,4 +926,4 @@ function buildStream(row, infoHash, magnetTrackers = [], imdbId = '') {
 const addonInterface = builder.getInterface();
 module.exports = addonInterface;
 
-module.exports.helpers = { numericNonNegative, metadataScore, parseStremioId, getLanguageTag, getResolutionTag, detectLanguageTag, formatSizeGB, parseSizeBytes, extractInfoHashFromMagnet, extractTrackersFromMagnet, extractTitleFromMagnet, sanitizeOneLine, buildStreamEntry, compareStreamEntries, streamHandler, createCachedStreamHandler, cachedStreamHandler, getSupabaseClient, configure, configStatus, normalizeSupabaseUrl, cleanEnvValue, torrentColumns };
+module.exports.helpers = { numericNonNegative, debugEnabled, metadataScore, parseStremioId, getLanguageTag, getResolutionTag, detectLanguageTag, formatSizeGB, parseSizeBytes, extractInfoHashFromMagnet, extractTrackersFromMagnet, extractTitleFromMagnet, sanitizeOneLine, buildStreamEntry, compareStreamEntries, streamHandler, createCachedStreamHandler, cachedStreamHandler, getSupabaseClient, configure, configStatus, normalizeSupabaseUrl, cleanEnvValue, torrentColumns };

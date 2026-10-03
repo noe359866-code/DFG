@@ -20,6 +20,38 @@ test('strict ids and specials', () => {
 test('language does not default to Spanish or match title substrings', () => {
   for (const [row, tag] of [[{ audio: 'English' }, 'ENG'], [{ language: 'es' }, 'ESP'], [{ audio: 'en-US' }, 'ENG'], [{ title: 'The Last Castle' }, 'N/D'], [{ audio: 'English Spanish' }, 'DUAL'], [{ audio: 'Castellano' }, 'CAST'], [{ title: 'Movie VOSE' }, 'VOSE'], [{ audio: 'English', title: 'Spanish story' }, 'ENG']]) assert.equal(getLanguageTag(row), tag);
 });
+
+test('structured language fields accept exact ISO codes without false positives', () => {
+  assert.equal(getLanguageTag({ language: 'es' }), 'ESP');
+  assert.equal(getLanguageTag({ language: 'en-US' }), 'ENG');
+  assert.equal(getLanguageTag({ lang: 'en', title: 'The Last Castle' }), 'ENG');
+  assert.equal(getLanguageTag({ lang: 'es', title: 'The Last Castle' }), 'ESP');
+  assert.equal(getLanguageTag({ title: 'The Last Castle' }), 'N/D');
+  assert.equal(getLanguageTag({ title: 'This is a story about an engineer' }), 'N/D');
+  assert.equal(getLanguageTag({ audio: ['es', '5.1'] }), 'ESP');
+  assert.equal(getLanguageTag({ audio_language: 'en', original_language: 'es' }), 'DUAL');
+});
+
+test('debug logging is opt-in', t => {
+  const { configure, debugEnabled } = addon.helpers;
+  t.after(() => configure(null));
+  configure({ DFG_DEBUG: '0' });
+  assert.equal(debugEnabled(), false);
+  configure({ DFG_DEBUG: '1' });
+  assert.equal(debugEnabled(), true);
+});
+
+test('release metadata scoring rewards reproducible formats after core quality/language', () => {
+  const a = addon.helpers.buildStreamEntry({
+    info_hash: 'a'.repeat(40), title: 'Movie 1080p Spanish WEB-DL', quality: '1080p',
+    audio: 'Spanish', seeders: 5
+  }, 'a'.repeat(40), [], 'tt1234567');
+  const b = addon.helpers.buildStreamEntry({
+    info_hash: 'b'.repeat(40), title: 'Movie 1080p Spanish CAM', quality: '1080p',
+    audio: 'Spanish', seeders: 5
+  }, 'b'.repeat(40), [], 'tt1234567');
+  assert.ok(addon.helpers.metadataScore(a) > addon.helpers.metadataScore(b));
+});
 test('sizes are finite and handle decimal commas', () => {
   assert.equal(formatSizeGB({ size: '1,5 GB' }), '1.50');
   assert.equal(formatSizeGB({ size: '512 MB' }), '0.50');
