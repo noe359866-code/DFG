@@ -7,6 +7,8 @@
 - **ISO de idioma corregido:** `es`, `spa`, `en`, `eng` y variantes regionales se reconocen cuando aparecen como códigos estructurados; no se interpretan palabras normales del título como idioma.
 - **Datos heterogéneos:** se aceptan arrays de audio y campos alternativos (`languages`, `audio_language`, `original_language`) para bases importadas desde distintas fuentes.
 - **Ranking refinado:** WEB-DL, WEBRip, BluRay, BDRip y HDTV aportan una señal secundaria después de disponibilidad, resolución e idioma; codec, HDR, audio y subtítulos siguen participando.
+- **Ranking más eficiente:** la puntuación de cada fuente se calcula una sola vez antes del `sort`, evitando repetir el análisis de codec/HDR/audio/formato en cada comparación.
+- **Logs de depuración opcionales:** los logs de flujo de nivel informativo quedan desactivados por defecto y se pueden activar con `DFG_DEBUG=1`; los avisos y errores operativos se mantienen.
 - **Procesamiento estable:** se mantienen la validación de BTIH, saneamiento de texto, normalización de trackers, deduplicación por hash+archivo y límites de candidatos/streams.
 - **Pruebas:** se añadieron regresiones para ISO, audio como array, combinación de idiomas y selección entre formatos equivalentes.
 - **Versión:** `package.json`, `package-lock.json` y el manifiesto quedan en `1.6.0`.
