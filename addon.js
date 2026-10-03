@@ -79,7 +79,7 @@ function debugEnabled() {
 }
 
 function debugLog(...args) {
-  if (debugEnabled()) debugLog(...args);
+  if (debugEnabled()) console.log(...args);
 }
 
 function cleanEnvValue(name) {
