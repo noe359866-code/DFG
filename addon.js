@@ -416,7 +416,8 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const QUERY_TIMEOUT_MS = 4000;
 const CANDIDATE_LIMIT = 50;
 const SCAN_LIMIT = 50;
-const MAX_STREAMS = 25;
+const MAX_STREAMS = 2;
+const MAX_LANGUAGE_STREAMS = 2;
 
 // Permite reducir el SELECT si el esquema no admite todas las columnas
 // opcionales. La lista se valida para que solo acepte identificadores simples.
@@ -583,12 +584,34 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
     for (const entry of streamEntries) entry.rankingScore = metadataScore(entry);
     streamEntries.sort(compareStreamEntries);
     const seen = new Set();
-    const streams = streamEntries.map(entry => entry.stream).filter(stream => {
+    const uniqueEntries = streamEntries.filter(entry => {
+      const stream = entry.stream;
       const key = `${stream.infoHash}:${stream.fileIdx ?? ''}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
-    }).slice(0, MAX_STREAMS);
+    });
+
+    // Respuesta pequeña y predecible: como máximo un candidato en español y
+    // uno en inglés. Como uniqueEntries ya está ordenado por calidad, el primer
+    // candidato de cada idioma es el mejor disponible.
+    const bestByLanguage = [];
+    let spanishSelected = false;
+    let englishSelected = false;
+
+    for (const entry of uniqueEntries) {
+      const language = entry.languageTag;
+      if ((language === 'ESP' || language === 'LAT' || language === 'CAST') && !spanishSelected) {
+        bestByLanguage.push(entry);
+        spanishSelected = true;
+      } else if (language === 'ENG' && !englishSelected) {
+        bestByLanguage.push(entry);
+        englishSelected = true;
+      }
+      if (bestByLanguage.length === MAX_LANGUAGE_STREAMS) break;
+    }
+
+    const streams = bestByLanguage.map(entry => entry.stream);
 
     console.log(`[Stream] → Enviando ${streams.length} streams válidos`);
     return { streams, cacheMaxAge: 120, staleRevalidate: 600, staleError: 600 };
@@ -790,7 +813,7 @@ function compareStreamEntries(a, b) {
   const health = healthTier(b.seeders) - healthTier(a.seeders);
   if (health !== 0) return health;
 
-  const scoreDiff = metadataScore(b) - metadataScore(a);
+  const scoreDiff = (b.rankingScore ?? metadataScore(b)) - (a.rankingScore ?? metadataScore(a));
   if (Math.abs(scoreDiff) > 0.0001) return scoreDiff;
 
   const seederDiff = b.seeders - a.seeders;
