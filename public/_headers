@@ -8,7 +8,11 @@
   X-Content-Type-Options: nosniff
   Referrer-Policy: no-referrer
 
+# La portada revalida en cada visita (ETag incluido): así deja de anunciar la
+# versión anterior en cuanto se publica un despliegue nuevo. Es el valor por
+# defecto de Workers Static Assets, declarado aquí a propósito.
 /
+  Cache-Control: public, max-age=0, must-revalidate
   Access-Control-Allow-Origin: *
   Access-Control-Allow-Headers: *
   Access-Control-Allow-Methods: GET, HEAD, OPTIONS
