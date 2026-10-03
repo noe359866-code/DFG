@@ -1,10 +1,21 @@
-# Nexo Play · 1.5.0
+# Nexo Play · 1.6.0
 
 ![Nexo Play](public/assets/brand.png)
 
 **Tu próxima historia, más cerca.** Películas, series y anime en español e inglés. Encuentra opciones de reproducción con información de idioma y calidad, en un solo lugar.
 
 Complemento de fuentes de reproducción para Stremio. No incluye un catálogo propio; las opciones aparecen en las fichas compatibles. Idiomas, calidad y disponibilidad dependen de los archivos disponibles. Utiliza únicamente contenido que tengas derecho a reproducir.
+
+## Novedades de 1.6.0
+
+- **Detección de idioma más precisa:** acepta códigos ISO estructurados (`es`, `spa`, `en`, `eng`, `en-US`, etc.) en campos de idioma/audio sin convertir palabras normales de títulos en idiomas.
+- **Más compatibilidad con datos importados:** procesa arrays de audio y campos alternativos como `languages`, `audio_language` y `original_language`.
+- **Ranking de releases mejorado:** además de resolución, idioma, seeders, codec y HDR, considera formatos como WEB-DL, WEBRip, BluRay y HDTV como señal secundaria de calidad/reproducibilidad.
+- **Procesamiento defensivo:** conserva la validación existente de hashes, magnets, tamaños, trackers, episodios y textos antes de generar streams.
+- **Pruebas de regresión ampliadas:** cubren códigos ISO exactos, arrays de audio y el nuevo componente de ranking.
+- **Versión sincronizada:** `package.json`, `package-lock.json` y el manifiesto publican `1.6.0`.
+
+Las mejoras de ranking y procesamiento son deterministas; no garantizan una mayor velocidad de descarga P2P, que depende de la red, disponibilidad de pares y fuente.
 
 ## Novedades de 1.5.0
 
