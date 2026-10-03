@@ -50,7 +50,8 @@ function configure(overrides) {
     SUPABASE_URL: overrides.SUPABASE_URL,
     SUPABASE_ANON_KEY: overrides.SUPABASE_ANON_KEY,
     SUPABASE_SERVICE_ROLE_KEY: overrides.SUPABASE_SERVICE_ROLE_KEY,
-    SUPABASE_TORRENT_COLUMNS: overrides.SUPABASE_TORRENT_COLUMNS
+    SUPABASE_TORRENT_COLUMNS: overrides.SUPABASE_TORRENT_COLUMNS,
+    DFG_DEBUG: overrides.DFG_DEBUG
   } : null;
   const changed = JSON.stringify(next) !== JSON.stringify(envOverrides);
   envOverrides = next;
@@ -70,6 +71,15 @@ function envValue(name) {
 function isPlaceholderValue(value) {
   const text = value.toLowerCase();
   return text.startsWith('tu_') || text.includes('xxxxxxxx') || text === 'changeme';
+}
+
+function debugEnabled() {
+  const value = cleanEnvValue('DFG_DEBUG');
+  return value === '1' || /^(true|yes|on)$/i.test(value || '');
+}
+
+function debugLog(...args) {
+  if (debugEnabled()) debugLog(...args);
 }
 
 function cleanEnvValue(name) {
@@ -567,6 +577,10 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
     }
     console.log(`[Stream] ${data.length} filas procesadas para ${imdbId} en ${Date.now() - start}ms`);
 
+    // Calcula la puntuación una sola vez antes de ordenar. El comparador puede
+    // ejecutarse decenas de veces; precomputarla evita repetir detección de
+    // codec/HDR/audio/formato para cada comparación.
+    for (const entry of streamEntries) entry.rankingScore = metadataScore(entry);
     streamEntries.sort(compareStreamEntries);
     const seen = new Set();
     const streams = streamEntries.map(entry => entry.stream).filter(stream => {
@@ -869,4 +883,4 @@ function buildStream(row, infoHash, magnetTrackers = [], imdbId = '') {
 const addonInterface = builder.getInterface();
 module.exports = addonInterface;
 
-module.exports.helpers = { numericNonNegative, metadataScore, parseStremioId, getLanguageTag, getResolutionTag, detectLanguageTag, formatSizeGB, parseSizeBytes, extractInfoHashFromMagnet, extractTrackersFromMagnet, extractTitleFromMagnet, sanitizeOneLine, buildStreamEntry, compareStreamEntries, streamHandler, createCachedStreamHandler, cachedStreamHandler, getSupabaseClient, configure, configStatus, normalizeSupabaseUrl, cleanEnvValue, torrentColumns };
+module.exports.helpers = { numericNonNegative, debugEnabled, metadataScore, parseStremioId, getLanguageTag, getResolutionTag, detectLanguageTag, formatSizeGB, parseSizeBytes, extractInfoHashFromMagnet, extractTrackersFromMagnet, extractTitleFromMagnet, sanitizeOneLine, buildStreamEntry, compareStreamEntries, streamHandler, createCachedStreamHandler, cachedStreamHandler, getSupabaseClient, configure, configStatus, normalizeSupabaseUrl, cleanEnvValue, torrentColumns };
