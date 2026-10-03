@@ -338,23 +338,54 @@ const LANGUAGE_SOURCES = row => [
   row.release_name, row.title, row.name
 ];
 
+function hasIsolatedWord(text, word, wordBoundaryChars = /[a-záéíóúñ0-9]/i) {
+  if (!text || !word) return false;
+  const lowerText = text.toLowerCase();
+  const lowerWord = word.toLowerCase();
+  let position = 0;
+  while ((position = lowerText.indexOf(lowerWord, position)) !== -1) {
+    const before = position > 0 ? lowerText[position - 1] : '';
+    const afterIndex = position + lowerWord.length;
+    const after = afterIndex < lowerText.length ? lowerText[afterIndex] : '';
+    // Si la palabra está incrustada en otras letras/números, no es un token
+    // aislado ("engineer" no contiene "en" como código).
+    if (wordBoundaryChars.test(before) || wordBoundaryChars.test(after)) {
+      position++;
+      continue;
+    }
+    // Para códigos de dos letras muy cortos (es/en), solo los aceptamos si
+    // NO están rodeados por espacios en AMBOS lados: así evitamos confundir
+    // la palabra española "es" o la preposición "en" con códigos de idioma
+    // en frases como "El episodio es en HD". Los códigos en campos estructurados
+    // ("es 5.1", "en es", "[ES]") siguen detectándose correctamente.
+    if (lowerWord.length === 2 && before === ' ' && after === ' ') {
+      position++;
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
 function detectLanguageTag(text) {
   if (typeof text !== 'string' || !text.trim()) return null;
   const lower = text.trim().toLowerCase();
   const has = pattern => pattern.test(lower);
 
-  // Los códigos ISO exactos solo se aceptan como tokens completos. Esto evita
-  // confundir palabras como "es" dentro de títulos, pero permite language=es
-  // y lang=en, un formato habitual en tablas importadas.
-  const spanishIso = /(?:^|[\s,;|/()[\]_-])(?:es|spa|es-es|es-mx|es-419|es-ar|es-cl|es-co|es-pe)(?:$|[\s,;|/()[\]_-])/.test(lower);
-  const englishIso = /(?:^|[\s,;|/()[\]_-])(?:en|eng|en-us|en-gb|en-au|en-ca)(?:$|[\s,;|/()[\]_-])/.test(lower);
+  // Los códigos ISO exactos solo se aceptan como tokens completos. Se evita
+  // confundir palabras comunes como "es" (verbo) o "en" (preposición) con
+  // códigos cuando aparecen rodeadas de espacios dentro de una oración.
+  const spanishIso = hasIsolatedWord(lower, 'es') ||
+    hasIsolatedWord(lower, 'spa') ||
+    /\bes[-_](?:es|mx|419|ar|cl|co|pe)\b/.test(lower);
+  const englishIso = hasIsolatedWord(lower, 'en') ||
+    hasIsolatedWord(lower, 'eng') ||
+    /\ben[-_](?:us|gb|au|ca)\b/.test(lower);
 
   const spanish = spanishIso ||
-    has(/\b(esp|español|spanish|castellano|cast|latino|lat|latam|latinoamérica)\b/) ||
-    has(/\bes[-_](?:es|mx|419|ar|cl|co|pe)\b/);
+    has(/\b(esp|español|spanish|castellano|cast|latino|lat|latam|latinoamérica|japonés|japones)\b/);
   const english = englishIso ||
-    has(/\b(eng|english|inglés|ingles)\b/) ||
-    has(/\ben[-_](?:us|gb|au|ca)\b/);
+    has(/\b(eng|english|inglés|ingles)\b/);
 
   if (has(/\b(dual|multi|dual-sub)\b/) || (spanish && english)) return 'DUAL';
   if (has(/\b(vose|vos|subtitulado)\b/)) return 'VOSE';
@@ -389,6 +420,69 @@ const RESOLUTION_TOKENS = [
   [/\b360[pi]?\b/, '360p']
 ];
 
+// Detección de HDR y formatos de audio premium para mostrarlos en la
+// descripción del stream y mejorar la puntuación de calidad.
+const HDR_TAGS = [
+  [/\b(dolby\s*vision|dolbyvision|\bdv\b)/i, 'DV'],
+  [/\bhdr10\+/i, 'HDR10+'],
+  [/\bhdr10\b/i, 'HDR10'],
+  [/\bhdr(?!10)/i, 'HDR']
+];
+const AUDIO_TAGS = [
+  [/atmos|truehd/i, 'Atmos'],
+  [/dts:?x|dts-?hd/i, 'DTS-HD'],
+  [/dts(?!-?hd|:?x)/i, 'DTS'],
+  [/ddp|eac3|dd\+|dolby\s*digital\s*\+/i, 'DD+'],
+  [/ac3|dolby\s*digital(?!\s*\+)/i, 'DD'],
+  [/aac(?!p)/i, 'AAC'],
+  [/flac/i, 'FLAC']
+];
+const VIDEO_CODEC_TAGS = [
+  [/\bav1\b/i, 'AV1'],
+  [/\b(hevc|h\.?265|x265)\b/i, 'HEVC'],
+  [/\b(h\.?264|x264|avc)\b/i, 'AVC'],
+  [/\bvp9\b/i, 'VP9']
+];
+const EDITION_TAGS = [
+  [/\b(remux|bdremux)\b/i, 'REMUX'],
+  [/\b(3d|hsbs|hou|sbs)\b/i, '3D'],
+  [/\bextended[\s.-]?(cut|edition)?\b/i, 'Extended'],
+  [/\bdirector'?s?[\s.-]?cut\b/i, "Director's Cut"],
+  [/\bunrated\b/i, 'Unrated'],
+  [/\bimax\b/i, 'IMAX']
+];
+// Etiquetas de advertencia que indican baja calidad o fuente no oficial
+const WARNING_TAGS = [
+  [/\b(cam|hdcam|ts|telesync|tc|telecine)\b/i, '⚠️ CAM/TS'],
+  [/\bscreener\b/i, 'SCREENER']
+];
+
+function detectTags(text, tagList) {
+  if (!text) return [];
+  const str = typeof text === 'string' ? text.toLowerCase() : '';
+  const found = [];
+  for (const [pattern, label] of tagList) {
+    if (pattern.test(str) && !found.includes(label)) found.push(label);
+  }
+  return found;
+}
+
+// Elimina etiquetas HDR redundantes: si hay DV, no hace falta mostrar HDR genérico;
+// si hay HDR10+, no hace falta HDR10 ni HDR.
+function cleanHdrTags(tags) {
+  if (!tags || !tags.length) return [];
+  const result = [...tags];
+  if (result.includes('HDR10+')) {
+    const idx = result.indexOf('HDR10');
+    if (idx >= 0) result.splice(idx, 1);
+  }
+  if (result.includes('DV') || result.includes('HDR10') || result.includes('HDR10+')) {
+    const idx = result.indexOf('HDR');
+    if (idx >= 0) result.splice(idx, 1);
+  }
+  return result;
+}
+
 function getResolutionTag(row) {
   const str = [row.resolution, row.quality, row.release_name, row.title, row.name]
     .filter(Boolean).join(' ').toLowerCase();
@@ -416,7 +510,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const QUERY_TIMEOUT_MS = 4000;
 const CANDIDATE_LIMIT = 50;
 const SCAN_LIMIT = 50;
-const MAX_STREAMS = 2;
+const MAX_STREAMS = 25;
 const MAX_LANGUAGE_STREAMS = 2;
 
 // Permite reducir el SELECT si el esquema no admite todas las columnas
@@ -592,46 +686,53 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
       return true;
     });
 
-    // Respuesta pequeña y predecible: como máximo un candidato en español y
-    // uno en inglés. Como uniqueEntries ya está ordenado por calidad, el primer
-    // candidato de cada idioma es el mejor disponible.
+    // Selección de streams: se prioriza el mejor candidato en español
+    // (ESP/LAT/CAST) y el mejor en inglés como opciones principales. Si no
+    // se encuentra ningún español, DUAL se usa como fallback. Después se
+    // añaden el resto de candidatos (incluidos VOSE, VOST, SUB y N/D) hasta
+    // el límite global para dar más opciones al usuario, manteniendo el
+    // orden por salud/calidad/seeders.
+    const selected = new Set();
     const bestByLanguage = [];
     let spanishSelected = false;
     let englishSelected = false;
-    let dualSelected = false;
 
-    // Prioridad: español + inglés. Si no existe español, DUAL actúa como
-    // sustituto del español para no dejar al usuario sin una opción equivalente.
-    for (const entry of uniqueEntries) {
-      const language = entry.langTag;
-
-      if ((language === 'ESP' || language === 'LAT' || language === 'CAST') && !spanishSelected) {
-        bestByLanguage.push(entry);
-        spanishSelected = true;
-      } else if (language === 'ENG' && !englishSelected) {
-        bestByLanguage.push(entry);
-        englishSelected = true;
-      }
-
-      if (bestByLanguage.length === MAX_LANGUAGE_STREAMS) break;
+    // 1. Mejor fuente en español
+    const spanishEntry = uniqueEntries.find(entry =>
+      ['ESP', 'LAT', 'CAST'].includes(entry.langTag)
+    );
+    if (spanishEntry) {
+      bestByLanguage.push(spanishEntry);
+      selected.add(spanishEntry);
+      spanishSelected = true;
     }
 
-    // Solo usamos DUAL si realmente no encontramos ningún español.
+    // 2. Mejor fuente en inglés
+    const englishEntry = uniqueEntries.find(entry => entry.langTag === 'ENG');
+    if (englishEntry) {
+      bestByLanguage.push(englishEntry);
+      selected.add(englishEntry);
+      englishSelected = true;
+    }
+
+    // 3. Si no hay español, DUAL ocupa su lugar como fallback
     if (!spanishSelected) {
       const dualEntry = uniqueEntries.find(entry => entry.langTag === 'DUAL');
       if (dualEntry) {
-        // Si ya hay inglés, DUAL ocupa el lugar del español.
-        if (englishSelected) {
-          bestByLanguage.unshift(dualEntry);
-        } else {
-          bestByLanguage.push(dualEntry);
-        }
-        dualSelected = true;
+        bestByLanguage.unshift(dualEntry);
+        selected.add(dualEntry);
       }
     }
 
-    // Garantiza como máximo dos resultados incluso cuando DUAL se añade como fallback.
-    const streams = bestByLanguage.slice(0, MAX_LANGUAGE_STREAMS).map(entry => entry.stream);
+    // 4. Rellenar con el resto de fuentes, en orden, hasta MAX_STREAMS
+    for (const entry of uniqueEntries) {
+      if (bestByLanguage.length >= MAX_STREAMS) break;
+      if (selected.has(entry)) continue;
+      bestByLanguage.push(entry);
+      selected.add(entry);
+    }
+
+    const streams = bestByLanguage.slice(0, MAX_STREAMS).map(entry => entry.stream);
 
     console.log(`[Stream] → Enviando ${streams.length} streams válidos`);
     return { streams, cacheMaxAge: 120, staleRevalidate: 600, staleError: 600 };
@@ -792,9 +893,14 @@ const QUALITY_WEIGHT = {
 
 // Puntuación secundaria para metadatos que no cambian la resolución, pero sí
 // ayudan a elegir una fuente reproducible cuando dos releases son equivalentes.
+// Los formatos de baja calidad (CAM, TS, HDCAM) se penalizan explícitamente
+// para que cualquier release digital les gane aunque tengan misma resolución.
 const FORMAT_TOKENS = Object.freeze({
   'web-dl': 7, 'webdl': 7, 'web rip': 6, 'webrip': 6, 'bluray': 6,
-  'brrip': 5, 'hdtv': 4, 'dvdrip': 2
+  'brrip': 5, 'hdtv': 4, 'dvdrip': 2, 'remux': 8
+});
+const LOW_QUALITY_PENALTIES = Object.freeze({
+  'cam': -15, 'hdcam': -12, 'ts': -10, 'telesync': -10, 'tc': -8, 'telecine': -8, 'screener': -3
 });
 const CODEC_WEIGHT = { av1: 8, hevc: 7, h265: 7, x265: 7, h264: 5, x264: 5, vp9: 4 };
 const HDR_WEIGHT = { 'dolby vision': 8, dolbyvision: 8, 'dv': 7, 'hdr10+': 7, hdr10: 6, hdr: 5, sdr: 0 };
@@ -805,26 +911,44 @@ function textLower(value) {
 
 function metadataScore(entry) {
   const row = entry?.row || {};
+  const combinedText = [row.release_name, row.title, row.name, row.quality, row.source, row.format]
+    .filter(Boolean).join(' ').toLowerCase();
   const resolutionScore = QUALITY_WEIGHT[entry.resolution] ?? 0;
   const langScore = LANGUAGE_WEIGHT[entry.langTag] ?? 0;
-  const codec = textLower(row.codec || row.video_codec);
-  const hdr = textLower(row.hdr_format || row.hdr);
+  const codec = textLower(row.codec || row.video_codec) + ' ' + combinedText;
+  const hdr = textLower(row.hdr_format || row.hdr) + ' ' + combinedText;
   const codecScore = Object.entries(CODEC_WEIGHT).reduce((best, [token, weight]) =>
     codec.includes(token) ? Math.max(best, weight) : best, 0);
   const hdrScore = Object.entries(HDR_WEIGHT).reduce((best, [token, weight]) =>
     hdr.includes(token) ? Math.max(best, weight) : best, 0);
-  const audioText = textLower(Array.isArray(row.audio) ? row.audio.join(' ') : row.audio);
+  const audioText = textLower(Array.isArray(row.audio) ? row.audio.join(' ') : row.audio) + ' ' + combinedText;
   const audioScore = /atmos|truehd|dts-hd|dts:x/.test(audioText) ? 5 :
+    /dts(?!-?hd)/.test(audioText) ? 4 :
     /aac|ac3|eac3|ddp|dolby/.test(audioText) ? 3 : 0;
-  const subtitleScore = row.subtitles || row.subs ? 1 : 0;
-  const formatText = textLower(row.source || row.format || row.quality);
-  const formatScore = Object.entries(FORMAT_TOKENS).reduce((best, [token, weight]) =>
-    formatText.includes(token) ? Math.max(best, weight) : best, 0);
+  const subtitleScore = (row.subtitles || row.subs || /subb?ed|subs\b|\bsub\b/.test(combinedText)) ? 1 : 0;
+  // Se busca el formato en todo el nombre del release, no solo en columnas
+  // específicas: muchas fuentes etiquetan WEB-DL/CAM directamente en el título.
+  const formatText = combinedText;
+  let formatScore = 0;
+  for (const [token, weight] of Object.entries(FORMAT_TOKENS)) {
+    if (formatText.includes(token)) formatScore = Math.max(formatScore, weight);
+  }
+  let qualityPenalty = 0;
+  for (const [token, penalty] of Object.entries(LOW_QUALITY_PENALTIES)) {
+    if (formatText.includes(token)) qualityPenalty = Math.min(qualityPenalty, penalty);
+  }
+  // Bonificación por ediciones especiales (Remux/IMAX/Extended)
+  const editionBonus = /\bremux\b/.test(formatText) ? 3 :
+    /\bimax\b|\bextended\b|director'?s/.test(formatText) ? 2 : 0;
+  // Pequeña penalización para 3D si el usuario busca 2D (no excluyente, solo desempata)
+  const threeDPenalty = /\b3d\b|hsbs|hou|\bsbs\b/.test(formatText) ? -1 : 0;
   const seedScore = Math.min(numericNonNegative(entry.seeders), 50);
-  const leecherPenalty = entry.leecherCount === null ? 0 :
-    Math.min(numericNonNegative(entry.leecherCount), 20) * 0.25;
+  // Los leechers solo se usan como desempate en el comparador (menos leechers
+  // primero, desconocidos al final), no en la puntuación de metadatos: su
+  // impacto es transitorio y no refleja calidad intrínseca del release.
   return resolutionScore + langScore + codecScore + hdrScore + audioScore +
-    subtitleScore + formatScore + seedScore * 0.4 - leecherPenalty;
+    subtitleScore + formatScore + qualityPenalty + editionBonus + threeDPenalty +
+    seedScore * 0.4;
 }
 
 function compareStreamEntries(a, b) {
@@ -839,6 +963,8 @@ function compareStreamEntries(a, b) {
   const seederDiff = b.seeders - a.seeders;
   if (seederDiff !== 0) return seederDiff;
   if (a.leecherCount !== b.leecherCount) {
+    // Valores desconocidos van al final; entre dos valores conocidos gana
+    // el que tiene MENOS leechers (menos cola para descargar).
     if (a.leecherCount === null) return 1;
     if (b.leecherCount === null) return -1;
     return a.leecherCount - b.leecherCount;
@@ -851,33 +977,58 @@ function compareStreamEntries(a, b) {
 // del episodio exacto (se etiqueta para que el usuario sepa qué descarga).
 function buildStreamEntry(row, infoHash, magnetTrackers = [], imdbId = '', magnetTitle = null, seasonPack = null, season = null) {
   const metadata = { ...row, name: row.name || magnetTitle };
+  const combinedText = [row.release_name, row.title, row.name, magnetTitle, row.quality, row.source, row.format]
+    .filter(Boolean).join(' ');
   const langTag = getLanguageTag(metadata);
   const resolution = getResolutionTag(metadata);
   const sizeGB = formatSizeGB(row);
   const sizeBytes = parseSizeBytes(row);
   const seeders = Math.max(0, toFiniteNumber(row.seeders ?? row.seed) ?? 0);
   const leecherCount = toFiniteNumber(row.leechers);
-  const audio = sanitizeOneLine(row.audio || row.language || row.lang) || 'No indicado';
-  const subs = sanitizeOneLine(row.subtitles || row.subs) || 'No indicados';
+
+  // Detectar etiquetas técnicas desde el nombre completo del release
+  const hdrTags = cleanHdrTags(detectTags(combinedText, HDR_TAGS));
+  const audioTags = detectTags(combinedText, AUDIO_TAGS);
+  const codecTags = detectTags(combinedText, VIDEO_CODEC_TAGS);
+  const editionTags = detectTags(combinedText, EDITION_TAGS);
+  const warningTags = detectTags(combinedText, WARNING_TAGS);
+
+  const audio = sanitizeOneLine(row.audio || row.language || row.lang) ||
+    (audioTags.length ? audioTags.join(' · ') : 'No indicado');
+  const subs = sanitizeOneLine(row.subtitles || row.subs);
   const rawTitle = row.title || row.release_name || row.name || magnetTitle || '';
   const titleDisplay = sanitizeOneLine(rawTitle) || 'Sin título';
-  const codec = sanitizeOneLine(row.codec || row.video_codec) || '—';
+  const codec = codecTags.length ? codecTags.join('/') :
+    (sanitizeOneLine(row.codec || row.video_codec) || '—');
   const group = sanitizeOneLine(row.release_group || row.group || row.team) || '—';
   const quality = sanitizeOneLine(row.quality) || resolution;
 
-  // name: cabecera corta visible en lista (máx ~30 chars)
-  const name = `Nexo Play\n[${langTag}] ${resolution}${seasonPack !== null ? ` · PACK T${seasonPack}` : ''}`;
+  // Badges técnicos que se añaden al nombre corto cuando están presentes
+  const badgeSuffix = [
+    ...warningTags.slice(0, 1),
+    ...hdrTags.slice(0, 1),
+    ...editionTags.slice(0, warningTags.length ? 1 : 2)
+  ].filter(Boolean).join(' · ');
+
+  // name: cabecera corta visible en lista
+  const nameParts = [`[${langTag}] ${resolution}`];
+  if (badgeSuffix) nameParts.push(badgeSuffix);
+  if (seasonPack !== null) nameParts.push(`PACK T${seasonPack}`);
+  const name = `Nexo Play\n${nameParts.join(' · ')}`;
 
   // title: multilínea con detalles (Stremio lo muestra al hacer hover)
+  const techBadges = [...hdrTags, ...codecTags.length ? [codec] : []].join(' · ');
   const titleLines = [
     `🎬 ${titleDisplay}`,
+    ...(warningTags.length ? [`🚨 Calidad: ${warningTags.join(' · ')}`] : []),
+    ...(editionTags.length ? [`🏷️ Edición: ${editionTags.join(' · ')}`] : []),
     ...(seasonPack !== null ? [`🗂️ Pack de la temporada ${seasonPack} completa (elige el episodio al reproducir)`] : []),
-    `🔊 Audio: ${audio} | 📝 Subs: ${subs}`,
+    `🔊 Audio: ${audio}${audioTags.length ? ` (${audioTags.join('/')})` : ''}`,
+    `📝 Subs: ${subs || 'No indicados'}${techBadges ? `  |  ⚡ ${techBadges}` : ''}`,
     `💾 Tamaño: ${sizeGB} GB`,
     `👥 Seeders: ${seeders}  |  🌱 Leechers: ${leecherCount ?? '—'}`,
     ...(seeders > 0 ? [] : ['⚠️ Sin seeders ahora mismo: puede que no se pueda reproducir']),
-    `⚙️ Codec: ${codec}  |  📦 Grupo: ${group}`,
-    `⭐ Calidad: ${quality}`
+    `📦 Grupo: ${group}  |  ⭐ Calidad: ${quality}`
   ];
 
   // Trackers del torrent: los del magnet original más los de la columna

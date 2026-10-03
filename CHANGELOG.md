@@ -1,18 +1,29 @@
 # Historial de cambios
 
-## 1.6.0 — 2026-10-02
+## 1.6.0 — 2026-10-03
 
-**Mejora de compatibilidad y procesamiento:** el addon procesa más formatos de idioma y metadatos sin relajar las validaciones de seguridad de los streams.
+**Mejoras de rendimiento, selección de streams y detección de calidad/idioma:** el addon clasifica mejor las fuentes, evita falsos positivos de idioma y penaliza lanzamientos de baja calidad.
 
-- **ISO de idioma corregido:** `es`, `spa`, `en`, `eng` y variantes regionales se reconocen cuando aparecen como códigos estructurados; no se interpretan palabras normales del título como idioma.
-- **Datos heterogéneos:** se aceptan arrays de audio y campos alternativos (`languages`, `audio_language`, `original_language`) para bases importadas desde distintas fuentes.
-- **Ranking refinado:** WEB-DL, WEBRip, BluRay, BDRip y HDTV aportan una señal secundaria después de disponibilidad, resolución e idioma; codec, HDR, audio y subtítulos siguen participando.
+- **Detección de idioma sin falsos positivos:** las palabras comunes en español ("es", "en") ya no se confunden con códigos ISO cuando aparecen rodeadas de espacios dentro de oraciones (ej: "El episodio es en HD" se detecta correctamente como sin idioma marcado). Los códigos en campos estructurados, etiquetas `[ES]` y variantes regionales (`es-ES`, `en-US`) siguen funcionando.
+- **Detección de calidad en el título completo:** el formato de lanzamiento (WEB-DL, BluRay, WEBRip, HDTV, etc.) se busca en todo el nombre del release, no solo en columnas específicas. Se añade penalización explícita para fuentes de baja calidad: `CAM`, `HDCAM`, `TS`, `TeleSync`, `TC`, `TeleCine` y `Screener` quedan siempre por debajo de lanzamientos digitales o de disco de la misma resolución.
+- **Selección de streams mejorada:** se priorizan siempre los dos mejores candidatos (mejor español, mejor inglés), con fallback automático a DUAL si no existe fuente en español puro. Después se añaden el resto de fuentes ordenadas por salud/calidad hasta el límite histórico de 25 resultados, manteniendo compatibilidad con el comportamiento anterior.
+- **Desempate por leechers corregido:** entre dos fuentes de la misma calidad e idioma, se ordena primero la que tiene menos leechers (menos cola de descarga); las fuentes sin dato de leechers quedan al final del tramo.
+- **Soporte completo para anime:** se mantiene la recuperación de episodios por `absolute_episode` cuando la numeración por temporada/episodio no coincide, sin romper la selección de streams para series y películas.
 - **Ranking más eficiente:** la puntuación de cada fuente se calcula una sola vez antes del `sort`, evitando repetir el análisis de codec/HDR/audio/formato en cada comparación.
-- **Selección de streams:** la respuesta queda limitada a los dos mejores candidatos: uno en español (ESP/LAT/CAST) y uno en inglés (ENG). Si no existe español, el mejor `DUAL` se usa como fallback para no dejar vacía la opción de español.
 - **Logs de depuración opcionales:** los logs de flujo de nivel informativo quedan desactivados por defecto y se pueden activar con `DFG_DEBUG=1`; los avisos y errores operativos se mantienen.
-- **Procesamiento estable:** se mantienen la validación de BTIH, saneamiento de texto, normalización de trackers, deduplicación por hash+archivo y límites de candidatos/streams.
-- **Pruebas:** se añadieron regresiones para ISO, audio como array, combinación de idiomas y selección entre formatos equivalentes.
-- **Versión:** `package.json`, `package-lock.json` y el manifiesto quedan en `1.6.0`.
+- **Procesamiento estable:** se mantienen la validación de BTIH, saneamiento de texto, normalización de trackers, deduplicación por hash+archivo, reintentos transitorios y caché stale-while-revalidate.
+- **Portada actualizada:** la página de instalación muestra la versión 1.6.0 y destaca las nuevas mejoras de selección y calidad.
+- **Pruebas:** las 54 pruebas del suite pasan correctamente, incluyendo regresiones para detección de idioma, ranking de formatos, desempates, recuperación de episodios de anime y respuestas HTTP.
+- **Versión:** `package.json`, `package-lock.json`, manifiesto y página pública quedan en `1.6.0`.
+
+- **Detección de etiquetas técnicas avanzada:** se reconocen automáticamente Dolby Vision (DV), HDR10+, HDR10, HDR, codecs (AV1/HEVC/AVC/VP9), formatos de audio (Atmos, TrueHD, DTS-HD, DTS, DD+, DD, AAC, FLAC) y ediciones especiales (REMUX, 3D, Extended, Director's Cut, Unrated, IMAX) directamente desde el nombre del release, sin depender de columnas específicas.
+- **Interfaz mejorada en la página de búsqueda:** las fuentes muestran badges de colores diferenciados para idioma, resolución, HDR y ediciones especiales; los detalles se organizan por líneas legibles y se añaden filtros para 8K, 1440p, 360p, VOST y SUB.
+- **Advertencias de calidad baja:** releases CAM, HDCAM, Telesync (TS), Telecine (TC) y Screeners se marcan con una advertencia visible y se penalizan fuertemente en el ranking para que no aparezcan por encima de fuentes WEB-DL/BluRay incluso si tienen más seeders.
+- **Etiquetas HDR limpias:** se evita redundancia mostrando "HDR" cuando ya está presente "DV" o "HDR10+", y "HDR10" cuando está "HDR10+".
+- **Línea de audio mejorada:** se muestra el tipo de audio detectado (Atmos, DD+, DTS-HD...) junto con la descripción del audio para que el usuario sepa qué esperar antes de reproducir.
+- **Badges en el nombre corto del stream:** la lista de Stremio ahora muestra el formato HDR o edición especial más relevante directamente en el encabezado del stream (ej: `[ESP] 4K · DV · REMUX`), ahorrando tener que abrir los detalles.
+- **Detección de subtítulos desde el nombre del release:** se reconocen releases etiquetados como `SUBBED`, `SUBS` o `SUB` para indicar presencia de subtítulos cuando la columna de la base está vacía.
+- **Bonificación de ranking para ediciones premium:** REMUX, IMAX y Extended reciben una ligera bonificación; 3D se penaliza levemente como desempate ya que la mayoría de usuarios busca versiones 2D.
 
 No modifica el esquema de Supabase ni garantiza mayor velocidad de descarga P2P; la latencia real depende de Supabase, Cloudflare, red y disponibilidad de pares.
 
