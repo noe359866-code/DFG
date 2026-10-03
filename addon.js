@@ -314,22 +314,40 @@ function formatSizeGB(row) {
 // su título sí declara el idioma. Antes solo se miraba la primera fuente y esas
 // filas quedaban como N/D.
 // ---------------------------------------------------------------------------
+function flattenLanguageValue(value) {
+  if (Array.isArray(value)) return value.filter(Boolean).join(' ');
+  if (value === null || value === undefined) return '';
+  return String(value);
+}
+
 const LANGUAGE_SOURCES = row => [
-  [row.audio, row.language, row.lang].filter(Boolean).join(' '),
+  [
+    row.audio, row.language, row.lang, row.languages,
+    row.audio_language, row.original_language
+  ].map(flattenLanguageValue).filter(Boolean).join(' '),
   row.release_name, row.title, row.name
 ];
 
 function detectLanguageTag(text) {
   if (typeof text !== 'string' || !text.trim()) return null;
-  const lower = text.toLowerCase();
+  const lower = text.trim().toLowerCase();
   const has = pattern => pattern.test(lower);
-  const spanish = has(/\b(esp|español|spanish|castellano|cast|latino|lat|latam|latinoamérica)\b/) ||
+
+  // Los códigos ISO exactos solo se aceptan como tokens completos. Esto evita
+  // confundir palabras como "es" dentro de títulos, pero permite language=es
+  // y lang=en, un formato habitual en tablas importadas.
+  const spanishIso = /(?:^|[\s,;|/()[\]_-])(?:es|spa|es-es|es-mx|es-419|es-ar|es-cl|es-co|es-pe)(?:$|[\s,;|/()[\]_-])/.test(lower);
+  const englishIso = /(?:^|[\s,;|/()[\]_-])(?:en|eng|en-us|en-gb|en-au|en-ca)(?:$|[\s,;|/()[\]_-])/.test(lower);
+
+  const spanish = spanishIso ||
+    has(/\b(esp|español|spanish|castellano|cast|latino|lat|latam|latinoamérica)\b/) ||
     has(/\bes[-_](?:es|mx|419|ar|cl|co|pe)\b/);
-  const english = has(/\b(eng|english|inglés|ingles)\b/) ||
+  const english = englishIso ||
+    has(/\b(eng|english|inglés|ingles)\b/) ||
     has(/\ben[-_](?:us|gb|au|ca)\b/);
+
   if (has(/\b(dual|multi|dual-sub)\b/) || (spanish && english)) return 'DUAL';
   if (has(/\b(vose|vos|subtitulado)\b/)) return 'VOSE';
-  // Audio foreign con subtítulos o subtítulos sampled: no es un idioma concreto.
   if (has(/\b(vost|vostfr|vosto|vosteng)\b/)) return 'VOST';
   if (has(/\b(sub|subt|subsample)\b/)) return 'SUB';
   if (has(/\b(castellano|cast)\b/)) return 'CAST';
@@ -714,6 +732,13 @@ const QUALITY_WEIGHT = {
   '8K': 100, '4K': 90, '1440p': 80, '1080p': 70,
   '720p': 55, '576p': 40, '480p': 30, '360p': 20
 };
+
+// Puntuación secundaria para metadatos que no cambian la resolución, pero sí
+// ayudan a elegir una fuente reproducible cuando dos releases son equivalentes.
+const FORMAT_TOKENS = Object.freeze({
+  'web-dl': 7, 'webdl': 7, 'web rip': 6, 'webrip': 6, 'bluray': 6,
+  'brrip': 5, 'hdtv': 4, 'dvdrip': 2
+});
 const CODEC_WEIGHT = { av1: 8, hevc: 7, h265: 7, x265: 7, h264: 5, x264: 5, vp9: 4 };
 const HDR_WEIGHT = { 'dolby vision': 8, dolbyvision: 8, 'dv': 7, 'hdr10+': 7, hdr10: 6, hdr: 5, sdr: 0 };
 
@@ -735,11 +760,14 @@ function metadataScore(entry) {
   const audioScore = /atmos|truehd|dts-hd|dts:x/.test(audioText) ? 5 :
     /aac|ac3|eac3|ddp|dolby/.test(audioText) ? 3 : 0;
   const subtitleScore = row.subtitles || row.subs ? 1 : 0;
+  const formatText = textLower(row.source || row.format || row.quality);
+  const formatScore = Object.entries(FORMAT_TOKENS).reduce((best, [token, weight]) =>
+    formatText.includes(token) ? Math.max(best, weight) : best, 0);
   const seedScore = Math.min(numericNonNegative(entry.seeders), 50);
   const leecherPenalty = entry.leecherCount === null ? 0 :
     Math.min(numericNonNegative(entry.leecherCount), 20) * 0.25;
   return resolutionScore + langScore + codecScore + hdrScore + audioScore +
-    subtitleScore + seedScore * 0.4 - leecherPenalty;
+    subtitleScore + formatScore + seedScore * 0.4 - leecherPenalty;
 }
 
 function compareStreamEntries(a, b) {
