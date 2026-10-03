@@ -1,10 +1,21 @@
-# Nexo Play · 1.6.0
+# Nexo Play · 1.6.1
 
 ![Nexo Play](public/assets/brand.png)
 
 **Tu próxima historia, más cerca.** Películas, series y anime en español e inglés. Encuentra opciones de reproducción con información de idioma y calidad, en un solo lugar.
 
 Complemento de fuentes de reproducción para Stremio. No incluye un catálogo propio; las opciones aparecen en las fichas compatibles. Idiomas, calidad y disponibilidad dependen de los archivos disponibles. Utiliza únicamente contenido que tengas derecho a reproducir.
+
+## Novedades de 1.6.1
+
+- **La portada muestra la versión viva:** la insignia del encabezado y el rótulo de novedades se rellenan desde `/health` del propio dominio, no desde una constante del HTML. Si el despliegue es antiguo, la página lo dice con la versión real en lugar de repetir el texto del archivo.
+- **Aviso de Preview:** cuando el dominio es un Preview de Workers Builds (`<alias de rama>-nexo-player-app.…` o `<hash>-nexo-player-app.…`) o el despliegue no tiene Supabase configurado, la portada avisa de que la búsqueda devolverá 0 fuentes y enlaza la URL publicada. Los Preview son copias congeladas de una rama: nunca reciben los cambios de `main`.
+- **Portada siempre revalidada:** `public/_headers` declara `Cache-Control: public, max-age=0, must-revalidate` en `/` (el valor por defecto de Workers Static Assets, ahora explícito): el navegador revalida con su ETag y no conserva la versión anterior tras un despliegue.
+- **`npm run check:live`:** compara `/health` y `/manifest.json` de un despliegue con la versión de `package.json`, avisa si el dominio es un Preview y devuelve código 1 cuando la web no publica la versión del paquete.
+- **Documentación de URLs:** la sección de despliegue separa la URL publicada de las URLs de Preview y explica cómo verificar la versión.
+- **Versión sincronizada:** `package.json`, `package-lock.json`, manifiesto y página pública quedan en `1.6.1`.
+
+No cambia la consulta a la base de datos ni la lógica de selección de fuentes: es la misma de 1.6.0.
 
 ## Novedades de 1.6.0
 
@@ -93,11 +104,27 @@ El repositorio está conectado a Cloudflare Workers Builds: cada push a `main` p
 - `name` en `wrangler.toml` debe ser exactamente el nombre del Worker del panel (`nexo-player-app`). Si no coincide, Workers Builds lo marca como error de nombre y `npm run deploy` crearía un Worker distinto.
 - En el panel (Worker → *Settings* → *Build*): **Build command** vacío (o `npm test`), **Deploy command** = `npx wrangler deploy` y **Non-production branch deploy command** = `npx wrangler preview` o `npx wrangler versions upload`. Un `npx wrangler preview` en producción nunca actualiza el sitio vivo.
 - Los secretos (`SUPABASE_URL`, `SUPABASE_ANON_KEY`) se definen en *Settings* → *Variables and Secrets* del Worker; los Preview no los heredan.
-- Si un build falla, el log está en *Deployments* → *View build* del Worker; el check `Workers Builds: nexo-player-app` del commit en GitHub enlaza directamente a él.
+- Si un build falla, el log está en *Deployments* → *View build* del Worker; el check `Workers Builds: nexo-player-app` del commit en GitHub enlaza directamente a él. Un build fallido no rompe la web (sigue sirviendo el último despliegue correcto), pero el cambio no llega hasta que el build termina bien; se puede reintentar desde el panel.
+
+### URLs: la publicada y los Preview
+
+- **Publicada (la única que conviene usar o instalar en Stremio):** <https://nexo-player-app.noe359866.workers.dev>. Se actualiza con cada merge a `main` y es la que responden `/manifest.json`, `/health` y la portada.
+- **Preview (`<alias de rama>-nexo-player-app.noe359866.workers.dev` o `<hash>-nexo-player-app.noe359866.workers.dev`):** cada rama y cada build tienen su propia URL. Son **copias congeladas** del commit que las generó: al fusionar la rama no se actualizan jamás, y al no heredar los secretos del Worker devuelven 0 fuentes. Un Preview de la época de 1.5.0 seguirá anunciando 1.5.0 para siempre, así que no sirve para comprobar si un cambio llegó a la web.
+- **Comprobación rápida de lo que hay publicado:**
+
+  ```sh
+  npm run check:live
+  # o contra otro dominio:
+  npm run check:live -- --url https://nexo-player-app.noe359866.workers.dev
+  ```
+
+  El script lee `/health` y `/manifest.json`, los compara con `package.json`, avisa si la URL es un Preview y termina con código 1 si el despliegue no publica la versión del paquete. La misma información, a mano: `curl -s https://nexo-player-app.noe359866.workers.dev/health`.
+- **Catálogo de stremio-addons.net:** la versión que muestra la ficha del complemento la actualiza el propio servicio cuando su mantenedor vuelve a guardar o refrescar la entrada desde su panel con sesión iniciada; su API pública es de solo lectura. Si la ficha sigue en una versión anterior, no es un fallo del despliegue: hay que refrescar la entrada allí.
 
 ```sh
 npm test
 npm run test:manifest
+npm run check:live
 npm audit --omit=dev
 ```
 
@@ -127,7 +154,8 @@ Los magnets admiten BTIH hexadecimal o base32; las filas sin hash válido se des
 - `worker.mjs`: punto de entrada ESM que expone el manejador a Wrangler.
 - `server.js`: adaptador local del mismo manejador al servidor HTTP de Node.
 - `wrangler.toml`: configuración del Worker y binding de estáticos.
-- `public/`: página de instalación e imagen de marca generada con IA. `index.html` y `assets/` son archivos estáticos: Workers Static Assets los sirve desde el edge sin invocar el Worker, `/assets/` anuncia un día de caché y `public/_headers` declara esas cabeceras.
+- `scripts/`: `benchmark.js` (medición simulada con datos de prueba) y `check-live.js` (`npm run check:live`).
+- `public/`: página de instalación e imagen de marca generada con IA. `index.html` y `assets/` son archivos estáticos: Workers Static Assets los sirve desde el edge sin invocar el Worker, `/assets/` anuncia un día de caché y la portada revalida en cada visita; `public/_headers` declara ambas cabeceras.
 - `test/`: pruebas unitarias y HTTP con datos simulados, incluida la caché del edge.
 
 La imagen se sirve desde el propio despliegue; no depende de un proveedor externo. El manifiesto HTTP incluye su URL absoluta. Las versiones fijadas mediante `overrides` corrigen dependencias transitivas del SDK sin degradarlo a una versión incompatible.

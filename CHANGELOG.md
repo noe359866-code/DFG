@@ -1,5 +1,19 @@
 # Historial de cambios
 
+## 1.6.1 — 2026-10-03
+
+**La web deja de poder mostrar una versión que no es la suya:** la portada lee la versión del Worker que responde, avisa cuando se visita un Preview congelado y se documenta qué URL es la publicada.
+
+- **Versión viva en la portada:** la insignia `STREMIO ADDON` y el rótulo `NOVEDADES ·` se rellenan desde `/health` del mismo dominio (una sola petición, `no-store`, con tolerancia a fallos: si no responde, el HTML conserva su valor). Una página servida por un Worker antiguo muestra su versión real, no la del archivo.
+- **Aviso al abrir un Preview:** si el dominio tiene forma de Preview de Workers Builds (`<alias de rama>-nexo-player-app.…` o `<hash>-nexo-player-app.…`) y el despliegue no trae Supabase configurado, la portada muestra un aviso con el motivo (0 fuentes) y un enlace a la URL publicada. Antes, abrir por error la URL de una rama fusionada parecía «la web no se actualiza»: esas URLs son copias congeladas del commit que las generó.
+- **Portada revalidada siempre:** `public/_headers` declara `Cache-Control: public, max-age=0, must-revalidate` en `/` (el comportamiento por defecto de Workers Static Assets, ahora explícito y documentado) para que el navegador revalide con ETag y no conserve el HTML anterior tras un despliegue. `/assets/` mantiene su día de caché.
+- **`npm run check:live`:** nuevo `scripts/check-live.js`; lee `/health` y `/manifest.json` del dominio indicado (o `CHECK_LIVE_URL`, o la URL publicada por defecto), los compara con `package.json`, avisa cuando la URL es un Preview y termina con código 1 si el despliegue no responde o publica otra versión. Sirve para distinguir un despliegue atrasado de un problema de caché del navegador.
+- **README:** nueva sección «URLs: la publicada y los Preview» con la URL publicada, la comprobación por `/health` y la nota de que la ficha de stremio-addons.net solo se refresca desde el panel de su mantenedor (su API pública es de solo lectura).
+- **Pruebas:** seis pruebas nuevas cubren la resolución de la URL (`--url`, `CHECK_LIVE_URL`, valor por defecto, protocolo inválido), la detección del host de Preview, la comparación de versiones, el caso sin red (código 1) y las cabeceras de revalidación y la versión publicada en `public/`.
+- **Versión:** `package.json`, `package-lock.json`, manifiesto y página pública quedan en `1.6.1`.
+
+La consulta a Supabase y la selección de fuentes son las mismas de 1.6.0; este parche solo afecta a la portada, a las cabeceras de la portada, a las herramientas y a la documentación.
+
 ## 1.6.0 — 2026-10-03
 
 **Mejoras de rendimiento, selección de streams y detección de calidad/idioma:** el addon clasifica mejor las fuentes, evita falsos positivos de idioma y penaliza lanzamientos de baja calidad.

@@ -18,6 +18,57 @@ document.getElementById('copy').addEventListener('click', async () => {
   }
 });
 
+// La versión que anuncia la portada sale del Worker desplegado (/health), no de
+// una constante del HTML: así la página nunca muestra una versión distinta de
+// la que responde en su propio dominio.
+const versionBadge = document.getElementById('version');
+const releaseLabel = document.getElementById('release');
+function applyLiveVersion(version) {
+  if (!/^\d+\.\d+\.\d+$/.test(version || '')) return;
+  if (versionBadge) versionBadge.textContent = version;
+  if (releaseLabel) releaseLabel.textContent = `NOVEDADES · ${version}`;
+}
+
+// Un Preview de Workers Builds vive en <alias o hash>-nexo-player-app.<subdominio>.workers.dev:
+// es una copia congelada de una rama, nunca recibe los cambios de main y no
+// hereda los secretos. El aviso evita confundirlo con la web publicada.
+const PREVIEW_HOST = /^[a-z0-9][a-z0-9-]*-(nexo-player-app)\.([a-z0-9.-]+\.workers\.dev)$/i;
+function productionUrlFor(hostname) {
+  const match = PREVIEW_HOST.exec(hostname || '');
+  return match ? `https://${match[1]}.${match[2]}` : null;
+}
+function showDeploymentNotice(productionUrl) {
+  if (document.querySelector('.deployment-notice')) return;
+  const notice = document.createElement('p');
+  notice.className = 'deployment-notice';
+  notice.setAttribute('role', 'status');
+  notice.textContent = productionUrl
+    ? 'Este dominio es un Preview de una rama: es una copia congelada, sin Supabase configurado, y no recibe los cambios de main. La versión publicada está en '
+    : 'Este despliegue no tiene Supabase configurado, así que la búsqueda devolverá 0 fuentes. Revisa /health para ver el diagnóstico.';
+  if (productionUrl) {
+    const link = document.createElement('a');
+    link.href = productionUrl;
+    link.textContent = productionUrl.replace('https://', '');
+    notice.append(link, document.createTextNode('.'));
+  }
+  const header = document.querySelector('header');
+  if (header) header.insertAdjacentElement('afterend', notice);
+  else document.body.prepend(notice);
+}
+
+function syncLiveVersion() {
+  fetch('/health', { cache: 'no-store' })
+    .then(response => (response.ok ? response.json() : null))
+    .then(health => {
+      if (!health || typeof health !== 'object') return;
+      applyLiveVersion(health.version);
+      const supabase = health.supabase || {};
+      if (supabase.configured === false) showDeploymentNotice(productionUrlFor(window.location.hostname));
+    })
+    .catch(() => { /* sin /health la insignia conserva el valor del HTML */ });
+}
+syncLiveVersion();
+
 // Solo consultas al mismo origen; nunca insertar metadatos como HTML.
 const searchForm = document.getElementById('search-form');
 const searchType = document.getElementById('search-type');
