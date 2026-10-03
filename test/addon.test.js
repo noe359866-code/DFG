@@ -32,6 +32,15 @@ test('structured language fields accept exact ISO codes without false positives'
   assert.equal(getLanguageTag({ audio_language: 'en', original_language: 'es' }), 'DUAL');
 });
 
+test('debug logging is opt-in', t => {
+  const { configure, debugEnabled } = addon.helpers;
+  t.after(() => configure(null));
+  configure({ DFG_DEBUG: '0' });
+  assert.equal(debugEnabled(), false);
+  configure({ DFG_DEBUG: '1' });
+  assert.equal(debugEnabled(), true);
+});
+
 test('release metadata scoring rewards reproducible formats after core quality/language', () => {
   const a = addon.helpers.buildStreamEntry({
     info_hash: 'a'.repeat(40), title: 'Movie 1080p Spanish WEB-DL', quality: '1080p',
