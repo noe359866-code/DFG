@@ -29,19 +29,67 @@ const language = document.getElementById('filter-language');
 const quality = document.getElementById('filter-quality');
 let sources = [];
 let controller;
+function parseStreamHeader(name) {
+  if (!name) return { lang: null, quality: null, badges: [] };
+  const lines = name.split('\n');
+  const header = lines[1] || lines[0] || '';
+  // Header format: [LANG] RESOLUTION · BADGE1 · BADGE2 · PACK
+  const langMatch = /\[([A-Z/]+)\]/.exec(header);
+  const afterLang = header.replace(/\[[^\]]+\]\s*/, '').trim();
+  const parts = afterLang.split('·').map(p => p.trim()).filter(Boolean);
+  const resolution = parts[0] || null;
+  const badges = parts.slice(1).filter(p => !p.startsWith('PACK'));
+  return {
+    lang: langMatch ? langMatch[1] : null,
+    quality: resolution,
+    badges
+  };
+}
+
 function renderSources() {
   const filtered = sources.filter(stream => {
-    const tags = /\[([^\]]+)\]\s+(.+)$/.exec(stream.name || '');
-    return (!language.value || tags?.[1] === language.value) && (!quality.value || tags?.[2] === quality.value);
+    const meta = parseStreamHeader(stream.name);
+    const langOk = !language.value || meta.lang === language.value;
+    const qualityOk = !quality.value || meta.quality === quality.value;
+    return langOk && qualityOk;
   });
   results.replaceChildren();
   for (const stream of filtered) {
     const item = document.createElement('li');
     const heading = document.createElement('strong');
+    const badgeRow = document.createElement('div');
     const details = document.createElement('p');
-    heading.textContent = stream.name;
-    details.textContent = stream.title;
-    item.append(heading, details);
+    const meta = parseStreamHeader(stream.name);
+    badgeRow.className = 'badges';
+    if (meta.lang) {
+      const langBadge = document.createElement('span');
+      langBadge.className = 'badge lang-' + meta.lang.toLowerCase();
+      langBadge.textContent = meta.lang;
+      badgeRow.append(langBadge);
+    }
+    if (meta.quality) {
+      const qBadge = document.createElement('span');
+      qBadge.className = 'badge quality';
+      qBadge.textContent = meta.quality;
+      badgeRow.append(qBadge);
+    }
+    for (const badge of meta.badges) {
+      const b = document.createElement('span');
+      b.className = 'badge tech';
+      b.textContent = badge;
+      badgeRow.append(b);
+    }
+    const titleLines = (stream.title || '').split('\n');
+    heading.textContent = titleLines[0] || 'Fuente';
+    details.innerHTML = '';
+    for (const line of titleLines.slice(1)) {
+      if (!line.trim()) continue;
+      const lineEl = document.createElement('span');
+      lineEl.className = 'detail-line';
+      lineEl.textContent = line;
+      details.append(lineEl);
+    }
+    item.append(heading, badgeRow, details);
     results.append(item);
   }
   searchStatus.textContent = sources.length
