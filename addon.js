@@ -600,7 +600,7 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
     let englishSelected = false;
 
     for (const entry of uniqueEntries) {
-      const language = entry.languageTag;
+      const language = entry.langTag;
       if ((language === 'ESP' || language === 'LAT' || language === 'CAST') && !spanishSelected) {
         bestByLanguage.push(entry);
         spanishSelected = true;
