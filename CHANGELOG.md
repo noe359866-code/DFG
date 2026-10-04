@@ -1,5 +1,32 @@
 # Historial de cambios
 
+## 1.6.3 — 2026-10-04
+
+**Fuentes de torrents mejor seleccionadas y catálogo de TV clasificado por tipo de contenido y país.**
+
+Selección de fuentes:
+
+- **Fuentes muertas fuera cuando hay alternativas:** si existen al menos 25 fuentes con seeders, las de cero seeders no se ofrecen; si hay pocas vivas, vuelven al final con su aviso «Sin seeders» en lugar de dejar la lista vacía.
+- **Packs de serie completa:** si no hay episodio exacto ni pack de temporada, se recupera un pack de la serie entera (`season` y `episode` nulos) etiquetado como `SERIE COMPLETA`.
+- **Episodios numerados en absoluto:** en la temporada 1 se acepta un episodio con `season` nulo cuando no hay coincidencia exacta; en otras temporadas no se inventa la correspondencia.
+- **Packs que ya no se encadenan:** `bingeGroup` distingue `sNpack` y `allpack`, así «siguiente episodio» no salta a un pack de temporada o de serie completa.
+- **Anime y series intercambiables:** en el cotejo de último recurso un título de anime guardado como `series` (y al revés) se recupera; las películas nunca entran en esa familia y la consulta principal sigue filtrando por el tipo pedido.
+- **Contadores tolerantes:** `seeders`/`seeds`/`seed` y `leechers`/`leechs`/`peers`, con notaciones como `1.2k` o `3,5 mil`; un valor ilegible cuenta como desconocido y no inventa pares.
+- **Trackers en cualquier formato:** array, lista separada por comas o saltos, o JSON serializado; se descartan los que no son UDP/HTTP(s) y se mantiene el respaldo de trackers públicos.
+- **Baja calidad por palabra completa:** «Torrents.com» no es `TS` ni «Webcam» es `CAM`; se añaden `HDTS`, `DVDScr`, `R5` y `Workprint` a las penalizaciones, y `BDRip`, `HDRip` y `WEB` a los formatos reproducibles.
+- **`VOSE` reconoce `VO`/`V.O.`** como versión original subtitulada, sin confundir «Voz original».
+- **Pruebas:** contadores compactos, formatos de trackers, falsos positivos de calidad baja, descarte de fuentes muertas, recuperación de packs de serie completa y de episodios sin temporada, y `bingeGroup` de los packs.
+
+Catálogo de TV:
+
+- **Clasificación por tipo de contenido:** la categoría declarada (`category`, `genres`, `group_title`…) se agrupa en Noticias, Deportes, Películas, Series, Infantil, Documentales, Música, Cultura, Entretenimiento, Estilo de vida, Viajes, Tecnología, Religión, Compras y General, reconociendo alias en español e inglés por palabra completa y con prioridad para el alias más largo («Sports HD» → Deportes, «TV Shows» → Series, «Home Shopping» → Compras). Las categorías desconocidas se conservan tal cual y las vacías caen en «General»; no se modifica la base de datos.
+- **Catálogo «Canales por país»:** nuevo catálogo `tv_channels_country` con el país como filtro. El país se resuelve desde `ES`, `ESP`, `es`, «España» o «Nicaragua» (con alias como `EEUU`, `UK` u `Holanda`) y se muestra con su nombre en español; `tv-countries.js` aporta la tabla ISO 3166-1 completa (250 países) sin dependencias ni peticiones externas.
+- **Filtros descubiertos en la tabla:** el manifiesto publica solo los tipos y países que existen de verdad (hasta 80 por catálogo, tipos por número de canales y países en orden alfabético español), con listas de respaldo si la base no responde o el despliegue no tiene secretos. La consulta de descubrimiento se cachea diez minutos, con una hora de ventana obsoleta, se refresca en segundo plano y nunca bloquea el manifiesto más de 2,5 segundos.
+- **Fichas y filtros coherentes:** `genres` en los metadatos pasa a ser el tipo de contenido y el país normalizados; `country` se muestra con su nombre en español; el filtro acepta el valor normalizado o el original de la tabla y sigue combinándose con `search` y `skip`.
+- **Manifiesto:** un catálogo por dimensión («Canales de TV» y «Canales por país»), ambos con `genre` (con `options`), `search` y `skip`. Stremio guarda el manifiesto en caché, así que puede hacer falta quitar y volver a añadir el complemento para ver los catálogos nuevos.
+- **Pruebas:** la clasificación de tipos y países, la agregación y caché de filtros, el catálogo por país y los filtros publicados en el manifiesto del Worker.
+- **Versión sincronizada:** `package.json`, `package-lock.json`, manifiesto y página pública quedan en `1.6.3`.
+
 ## 1.6.2 — 2026-10-04
 
 **Canales de TV en vivo desde Supabase:** el addon ahora publica un catálogo de televisión propio en Stremio, además de las fuentes existentes de películas, series y anime.

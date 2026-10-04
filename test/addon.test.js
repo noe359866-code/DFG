@@ -10,10 +10,16 @@ test('consistent release and private public description', () => {
   assert.doesNotMatch(addon.manifest.description, /supabase|public\.torrents|service_role/i);
   assert.ok(addon.manifest.types.includes('tv'));
   assert.ok(addon.manifest.resources.some(resource => resource === 'catalog'));
-  assert.deepEqual(addon.manifest.catalogs[0], {
-    type: 'tv', id: 'tv_channels', name: 'Canales de TV',
-    extra: [{ name: 'search' }, { name: 'genre' }, { name: 'skip' }]
-  });
+  assert.deepEqual(addon.manifest.catalogs.map(catalog => [catalog.type, catalog.id, catalog.name]), [
+    ['tv', 'tv_channels', 'Canales de TV'],
+    ['tv', 'tv_channels_country', 'Canales por país']
+  ], 'un catálogo por tipo de contenido y otro por país');
+  for (const catalog of addon.manifest.catalogs) {
+    assert.deepEqual(catalog.extra.map(prop => prop.name), ['genre', 'search', 'skip']);
+    assert.deepEqual(catalog.extra[0].options, catalog.genres,
+      'las opciones del filtro y los géneros anunciados coinciden');
+    assert.ok(catalog.genres.length > 0, 'el filtro nunca llega vacío a Stremio');
+  }
 });
 test('public stremio-addons.net verification in manifest', () => {
   assert.equal(addon.manifest.stremioAddonsConfig.issuer, 'https://stremio-addons.net');
@@ -99,7 +105,8 @@ test('TV catalog, metadata and live streams read public.tv_channels', async () =
   assert.equal(catalog.metas[0].name, 'Águila Deportes', 'ordena por nombre alfabéticamente');
   assert.equal(catalog.metas[0].type, 'tv');
   assert.equal(catalog.metas[0].poster, 'https://addon.example/assets/brand.png', 'usa la marca si no hay logo');
-  assert.equal(catalog.metas[0].country, 'NIC', 'mapea country_code a los metadatos de Stremio');
+  assert.equal(catalog.metas[0].country, 'Nicaragua', 'el país del canal se publica con su nombre en español');
+  assert.deepEqual(catalog.metas[0].genres, ['Deportes', 'Nicaragua'], 'los géneros son el tipo de contenido y el país');
   assert.equal(catalog.metas[0].behaviorHints.isLive, true);
   assert.equal(catalog.metas[1].poster, 'https://img.example/news.png');
   assert.ok(m.calls.some(call => call[0] === 'from' && call[1] === 'tv_channels'));
@@ -109,6 +116,16 @@ test('TV catalog, metadata and live streams read public.tv_channels', async () =
     type: 'tv', id: 'tv_channels', extra: { search: 'aguila', genre: 'deportes' }
   }, m.client);
   assert.deepEqual(filtered.metas.map(meta => meta.name), ['Águila Deportes'], 'search filtra ignorando tildes y mayúsculas');
+
+  const byCountry = await tvCatalogHandler({
+    type: 'tv', id: 'tv_channels_country', extra: { genre: 'Nicaragua' }
+  }, m.client);
+  assert.equal(byCountry.metas.length, 2, 'el catálogo por país filtra por el país normalizado');
+  const byCountryCode = await tvCatalogHandler({
+    type: 'tv', id: 'tv_channels_country', extra: { genre: 'NIC' }
+  }, m.client);
+  assert.equal(byCountryCode.metas.length, 2, 'el código alpha-3 de la tabla también sirve como filtro');
+  assert.deepEqual(await tvCatalogHandler({ type: 'tv', id: 'otro_catalogo' }, m.client), { metas: [] });
 
   const channelId = catalog.metas[0].id;
   const metadata = await tvMetaHandler({ type: 'tv', id: channelId, origin: 'https://addon.example' }, m.client);
@@ -146,6 +163,97 @@ test('TV embed channels are exposed as external links', async () => {
   assert.equal(result.streams[0].externalUrl, 'https://player.example/channel/4');
   assert.equal(result.streams[0].url, undefined);
 });
+test('TV content types group the aliases declared in the table', () => {
+  const { canonicalTVContentType, channelContentType } = addon.helpers;
+  for (const [value, expected] of [
+    ['Deportes', 'Deportes'], ['deportes hd', 'Deportes'], ['Sports', 'Deportes'], ['SPORTS FHD', 'Deportes'],
+    ['Noticias', 'Noticias'], ['Noticias 24h', 'Noticias'], ['News', 'Noticias'], ['informativo', 'Noticias'],
+    ['Películas', 'Películas'], ['Cine', 'Películas'], ['Estrenos', 'Películas'],
+    ['Series', 'Series'], ['TV Shows', 'Series'], ['telenovelas', 'Series'],
+    ['Infantil', 'Infantil'], ['Dibujos animados', 'Infantil'], ['Kids', 'Infantil'],
+    ['Documentales', 'Documentales'], ['Naturaleza', 'Documentales'],
+    ['Música', 'Música'], ['Cultura', 'Cultura'], ['Talk Show', 'Entretenimiento'],
+    ['Home Shopping', 'Compras'], ['Estilo de vida', 'Estilo de vida'], ['Religión', 'Religión'],
+    ['Ciencia', 'Tecnología'], ['Viajes', 'Viajes'], ['General', 'General'], ['Generalista', 'General']
+  ]) assert.equal(canonicalTVContentType(value), expected, `«${value}» debe clasificarse como ${expected}`);
+  assert.equal(canonicalTVContentType('Cine y series'), 'Series', 'con dos alias gana el más largo');
+  assert.equal(canonicalTVContentType('deportistas'), '', 'solo cuenta la palabra completa');
+  assert.equal(canonicalTVContentType('Canal de barrio'), '', 'una categoría desconocida no se inventa');
+  assert.equal(canonicalTVContentType('Nacionales'), 'General', 'los plurales también se reconocen');
+  assert.equal(canonicalTVContentType('Sin categoría'), 'General');
+  assert.equal(channelContentType(['Región andina']), 'Región andina', 'la categoría desconocida se respeta tal cual');
+  assert.equal(channelContentType(['Categoría rara', 'Deportes']), 'Deportes', 'manda la primera categoría reconocible');
+  assert.equal(channelContentType(['HD', 'FHD 1080p']), 'General', 'las etiquetas técnicas no son un tipo de contenido');
+  assert.equal(channelContentType(['HD', 'Cine']), 'Películas', 'una etiqueta técnica no tapa a la categoría real');
+  assert.equal(channelContentType([]), 'General', 'sin categoría declarada queda «General»');
+});
+
+test('TV countries resolve alpha-2, alpha-3 and Spanish names', () => {
+  const { countryCodeFromValue, countryNameFromValue } = addon.helpers;
+  assert.equal(countryCodeFromValue('ES'), 'ES');
+  assert.equal(countryCodeFromValue('es'), 'ES');
+  assert.equal(countryCodeFromValue('NIC'), 'NI', 'la tabla puede guardar alpha-3');
+  assert.equal(countryCodeFromValue('España'), 'ES');
+  assert.equal(countryCodeFromValue('estados unidos'), 'US');
+  assert.equal(countryCodeFromValue('EEUU'), 'US');
+  assert.equal(countryCodeFromValue('Región andina'), '');
+  assert.equal(countryNameFromValue('NIC'), 'Nicaragua');
+  assert.equal(countryNameFromValue('MX'), 'México');
+  assert.equal(countryNameFromValue('mexico'), 'México', 'un nombre sin tilde se corrige al oficial');
+  assert.equal(countryNameFromValue('Europa'), 'Europa', 'lo que no es un país se respeta');
+  assert.equal(countryNameFromValue(''), '');
+});
+
+test('TV filters are discovered in the table, ordered and cached', async () => {
+  const { tvGenreOptions, tvCatalogOptions, tvCatalogDefinitions, resetTVGenreOptionsCache } = addon.helpers;
+  const discovered = tvGenreOptions([
+    { contentType: 'Deportes', country: 'Nicaragua' },
+    { contentType: 'Noticias', country: 'España' },
+    { contentType: 'Noticias', country: 'Nicaragua' },
+    { contentType: 'Región andina', country: 'Nicaragua' }
+  ]);
+  assert.deepEqual(discovered.contentTypes, ['Noticias', 'Deportes', 'Región andina'],
+    'los tipos más frecuentes van primero');
+  assert.deepEqual(discovered.countries, ['España', 'Nicaragua'], 'los países se ordenan alfabéticamente');
+  assert.deepEqual(tvCatalogDefinitions(discovered).map(catalog => catalog.genres), [
+    ['Noticias', 'Deportes', 'Región andina'], ['España', 'Nicaragua']
+  ], 'el manifiesto publica lo descubierto');
+
+  const m = mock([
+    { name: 'A', category: 'Deportes', country_code: 'NIC' },
+    { name: 'B', category: 'Noticias', country_code: 'ES' }
+  ]);
+  resetTVGenreOptionsCache();
+  const first = await tvCatalogOptions(m.client, { force: true });
+  assert.deepEqual(first, { contentTypes: ['Deportes', 'Noticias'], countries: ['España', 'Nicaragua'] });
+  const cached = await tvCatalogOptions(() => { throw new Error('no debe consultarse'); });
+  assert.deepEqual(cached, first, 'una lista fresca no vuelve a consultar la base');
+
+  const stale = await tvCatalogOptions(() => { throw new Error('base caída'); },
+    { now: Date.now() + 11 * 60 * 1000 });
+  assert.deepEqual(stale, first, 'una lista obsoleta se sirve mientras se refresca en segundo plano');
+
+  resetTVGenreOptionsCache();
+  assert.equal(await tvCatalogOptions(() => { throw new Error('base caída'); }, { force: true }), null,
+    'sin datos ni caché se responde con el respaldo, nunca con un error');
+  resetTVGenreOptionsCache();
+});
+
+test('anime typed as series (and the reverse) is recovered in the last-resort scan', async () => {
+  const rows = [{ info_hash: hexHash(80), type: 'series', season: 1, episode: 3, title: 'Anime 1080p Japonés Sub', seeders: 6 }];
+  const anime = await streamHandler({ type: 'anime', id: 'tt1234567:1:3' },
+    sequenceMock([{ data: [], error: null }, { data: rows, error: null }]).client);
+  assert.equal(anime.streams.length, 1, 'un anime guardado como «series» se recupera');
+
+  const movieMock = mock([{ info_hash: hexHash(81), type: 'movie', title: 'Pelicula 1080p', seeders: 9 }]);
+  await streamHandler({ type: 'movie', id: 'tt1234567' }, movieMock.client);
+  assert.ok(movieMock.calls.some(call => call[0] === 'eq' && call[1] === 'type' && call[2] === 'movie'),
+    'las películas se piden a la base con su propio tipo');
+  assert.equal(addon.helpers.sameContentFamily('movie', 'series'), false, 'una película no entra en la familia episódica');
+  assert.equal(addon.helpers.sameContentFamily('series', 'anime'), true);
+  assert.equal(addon.helpers.sameContentFamily(null, 'series'), false);
+});
+
 test('episode filter, hash fallback, dedup and file index', async () => {
   const m = mock([{ info_hash: hash, file_idx: 0, season: 0, episode: 1, audio: 'English' }, { info_hash: hash, file_idx: 0, season: 0, episode: 1 }, { magnet: `magnet:?xt=urn:btih:${hash}`, file_idx: 1, season: 0, episode: 1 }, { magnet: 'magnet:bad', season: 0, episode: 1 }]);
   const result = await streamHandler({ type: 'series', id: 'tt1234567:0:1' }, m.client);
@@ -487,6 +595,60 @@ test('language falls back to the release name when the audio column says nothing
   assert.equal(getLanguageTag({ audio: 'Dolby Digital', title: 'The Last Castle' }), 'N/D');
 });
 
+test('VO and V.O. read as original-version subtitled, not as unknown', () => {
+  assert.equal(getLanguageTag({ audio: 'V.O.' }), 'VOSE');
+  assert.equal(getLanguageTag({ audio: 'VO' }), 'VOSE');
+  assert.equal(getLanguageTag({ title: 'Movie 2020 [VO] 1080p' }), 'VOSE');
+  assert.equal(getLanguageTag({ title: 'Movie 2020 Voz original' }), 'N/D', '«Voz» no es «VO»');
+});
+
+test('seeders and leechers accept compact notation and alternative columns', () => {
+  const base = { info_hash: hexHash(40), title: 'Movie 1080p Español', seeders: 5 };
+  assert.equal(addon.helpers.buildStreamEntry(base, hexHash(40)).seeders, 5);
+  assert.equal(addon.helpers.buildStreamEntry({ ...base, seeders: '1.2k' }, hexHash(40)).seeders, 1200,
+    '«1.2k» es 1200 pares');
+  assert.equal(addon.helpers.buildStreamEntry({ ...base, seeders: '3,5 mil' }, hexHash(40)).seeders, 3500);
+  assert.equal(addon.helpers.buildStreamEntry({ ...base, seeders: null, seeds: 9 }, hexHash(40)).seeders, 9,
+    'la columna «seeds» también se lee');
+  assert.equal(addon.helpers.buildStreamEntry({ ...base, seeders: 'muchos' }, hexHash(40)).seeders, 0,
+    'un valor ilegible no inventa pares');
+  assert.equal(addon.helpers.buildStreamEntry({ ...base, leechers: '2k' }, hexHash(40)).leecherCount, 2000);
+  assert.equal(addon.helpers.buildStreamEntry({ ...base, peers: 7 }, hexHash(40)).leecherCount, 7);
+});
+
+test('tracker columns accept arrays, comma lists and serialized JSON', () => {
+  const entry = row => addon.helpers.buildStreamEntry(
+    { info_hash: hexHash(41), title: 'Movie 1080p', seeders: 3, ...row }, hexHash(41)
+  );
+  assert.deepEqual(entry({
+    trackers: '["udp://a.example:1337/announce","https://b.example/announce","javascript:alert(1)"]'
+  }).stream.sources, ['tracker:udp://a.example:1337/announce', 'tracker:https://b.example/announce'],
+  'un JSON serializado con una URL inválida se filtra igual');
+  assert.deepEqual(entry({
+    trackers: 'udp://c.example:6969/announce, udp://d.example:80/announce'
+  }).stream.sources, ['tracker:udp://c.example:6969/announce', 'tracker:udp://d.example:80/announce']);
+  assert.deepEqual(entry({ trackers: ['udp://e.example:1337/announce'] }).stream.sources,
+    ['tracker:udp://e.example:1337/announce']);
+  const fallback = entry({ trackers: 'no es una lista' }).stream.sources;
+  assert.ok(fallback.length > 0 && fallback.every(source => source.startsWith('tracker:udp://')),
+    'sin trackers usables se ofrecen los públicos de respaldo');
+});
+
+test('low-quality detection uses whole words so site names do not penalize', () => {
+  const { metadataScore, buildStreamEntry } = addon.helpers;
+  const score = title => metadataScore(buildStreamEntry(
+    { info_hash: hexHash(42), title, seeders: 5 }, hexHash(42)
+  ));
+  assert.equal(score('Movie 1080p WEB-DL Torrents.com'), score('Movie 1080p WEB-DL'),
+    '«Torrents» no es la etiqueta TS');
+  assert.ok(score('Movie 1080p HDCAM') < score('Movie 1080p WEB-DL'));
+  assert.ok(score('Movie 1080p TS') < score('Movie 1080p WEB-DL'));
+  assert.ok(score('Movie 1080p DVDScr') < score('Movie 1080p WEB-DL'), 'el screener de DVD también se penaliza');
+  assert.ok(score('Movie 1080p R5') < score('Movie 1080p WEB-DL'));
+  assert.ok(score('Movie 1080p BDRip') > score('Movie 1080p HDTS'), 'un BDRip encuentra su formato y gana al TS');
+  assert.ok(score('Movie 1080p HDRip') > score('Movie 1080p Workprint'));
+});
+
 test('resolution covers the intermediate and top heights without false positives', () => {
   assert.equal(getResolutionTag({ quality: 'WEB-DL 1440p' }), '1440p');
   assert.equal(getResolutionTag({ title: 'Pelicula 8K' }), '8K');
@@ -547,6 +709,58 @@ test('ranking breaks ties on leechers and finishes on a stable hash order', asyn
     'el mismo grupo de filas produce la misma lista en el mismo orden');
 });
 
+test('dead sources are dropped when there are enough healthy ones to fill the list', async () => {
+  const healthy = Array.from({ length: 30 }, (_, i) => ({
+    info_hash: hexHash(200 + i), title: `Movie ${i} 1080p Español`, seeders: 30 - i, audio: 'Spanish'
+  }));
+  const dead = Array.from({ length: 5 }, (_, i) => ({
+    info_hash: hexHash(400 + i), title: `Movie muerta ${i} 4K Español`, seeders: 0, audio: 'Spanish'
+  }));
+  const result = await streamHandler({ type: 'movie', id: 'tt1234567' }, mock([...dead, ...healthy]).client);
+  assert.equal(result.streams.length, 25);
+  assert.equal(result.streams.filter(stream => /Sin seeders/.test(stream.title)).length, 0,
+    'con 25 fuentes vivas no se ofrecen fuentes muertas');
+
+  const scarce = await streamHandler({ type: 'movie', id: 'tt1234567' }, mock([
+    { info_hash: hexHash(500), title: 'Movie viva 1080p Español', seeders: 4, audio: 'Spanish' },
+    { info_hash: hexHash(501), title: 'Movie muerta 4K', seeders: 0 }
+  ]).client);
+  assert.equal(scarce.streams.length, 2, 'sin fuentes suficientes, las muertas siguen como último recurso');
+  assert.match(scarce.streams[1].title, /Sin seeders/);
+});
+
+test('a whole-series pack is recovered when the season has no sources', async () => {
+  const m = sequenceMock([
+    { data: [], error: null },
+    { data: [
+      { info_hash: hexHash(60), title: 'Serie completa 1080p Español', seeders: 9, season: null, episode: null },
+      { info_hash: hexHash(61), title: 'Otra serie completa 720p', seeders: 3, season: null, episode: null }
+    ], error: null }
+  ]);
+  const result = await streamHandler({ type: 'series', id: 'tt1234567:3:7' }, m.client);
+  assert.equal(result.streams.length, 2);
+  assert.match(result.streams[0].name, /SERIE COMPLETA/);
+  assert.match(result.streams[0].title, /serie completa/);
+  assert.match(result.streams[0].behaviorHints.bingeGroup, /\|allpack\|/,
+    'el pack completo no comparte grupo de reproducción continua con los episodios');
+});
+
+test('season-less episodes are recovered for season one without inventing episodes', async () => {
+  const rows = [
+    { info_hash: hexHash(70), title: 'Anime 1080p Japonés', seeders: 8, season: null, episode: 5 },
+    { info_hash: hexHash(71), title: 'Anime 1080p Japonés', seeders: 2, season: null, episode: 6 }
+  ];
+  const first = await streamHandler({ type: 'series', id: 'tt1234567:1:5' },
+    sequenceMock([{ data: [], error: null }, { data: rows, error: null }]).client);
+  assert.equal(first.streams.length, 1, 'solo el episodio pedido');
+  assert.equal(first.streams[0].infoHash, hexHash(70));
+
+  const other = await streamHandler({ type: 'series', id: 'tt1234567:2:5' },
+    sequenceMock([{ data: [], error: null }, { data: rows, error: null }, { data: [], error: null }]).client);
+  assert.equal(other.streams.length, 0,
+    'en la temporada 2 un episodio sin temporada no se da por bueno');
+});
+
 test('the response is capped even when the table offers many more sources', async () => {
   const rows = Array.from({ length: 40 }, (_, i) => ({
     info_hash: hexHash(i + 1), title: `Movie ${i} 1080p Español`, seeders: 40 - i, audio: 'Spanish'
@@ -581,6 +795,8 @@ test('the in-memory scan also finds packs whose episode is empty instead of NULL
   assert.equal(result.streams.length, 1);
   assert.match(result.streams[0].name, /PACK T2/, 'un pack con episode vacío se etiqueta igual que uno con NULL');
   assert.match(result.streams[0].title, /temporada 2 completa/);
+  assert.match(result.streams[0].behaviorHints.bingeGroup, /\|s2pack\|/,
+    'el pack lleva su propio grupo para no encadenarse con los episodios sueltos');
 });
 
 test('the in-memory scan never runs when the exact episode already answered', async () => {

@@ -153,12 +153,17 @@ test('TV catalog, metadata and stream routes are exposed by the Worker', async t
   assert.deepEqual(calls[0][1].extra, { search: 'Noticias', skip: '100' });
   assert.equal(calls[0][1].origin, 'https://example.com');
 
+  const byCountry = await fetchWorker('/catalog/tv/tv_channels_country.json?genre=Nicaragua');
+  assert.equal(byCountry.status, 200);
+  assert.equal(calls[1][1].id, 'tv_channels_country', 'el catálogo por país enruta al mismo handler');
+  assert.deepEqual(calls[1][1].extra, { genre: 'Nicaragua' });
+
   const channelId = 'nexo-tv:aWQ6MQ';
   const metadata = await fetchWorker(`/meta/tv/${channelId}.json`);
   assert.equal((await metadata.json()).meta.id, channelId);
   const playback = await fetchWorker(`/stream/tv/${channelId}.json`);
   assert.equal((await playback.json()).streams[0].url, 'https://video.example/live.m3u8');
-  assert.deepEqual(calls.slice(1).map(call => call[0]), ['meta', 'stream']);
+  assert.deepEqual(calls.slice(2).map(call => call[0]), ['meta', 'stream']);
 });
 
 test('TV catalog query filters use separate edge-cache keys', async t => {
@@ -183,6 +188,30 @@ test('TV catalog query filters use separate edge-cache keys', async t => {
   await Promise.all(tasks);
   assert.equal(calls, 2, 'cada filtro genera su catálogo una sola vez');
   assert.equal(caches.puts, 2, 'la query forma parte de la clave de caché del catálogo');
+});
+
+test('manifest publishes the TV filters discovered in the table', async t => {
+  const original = addon.helpers.tvCatalogOptions;
+  t.after(() => {
+    addon.helpers.tvCatalogOptions = original;
+    addon.helpers.resetTVGenreOptionsCache();
+  });
+
+  addon.helpers.tvCatalogOptions = async () => ({
+    contentTypes: ['Noticias', 'Deportes'], countries: ['España', 'Nicaragua']
+  });
+  const manifest = await (await fetchWorker('/manifest.json')).json();
+  assert.deepEqual(manifest.catalogs.map(catalog => catalog.id), ['tv_channels', 'tv_channels_country']);
+  assert.deepEqual(manifest.catalogs[0].genres, ['Noticias', 'Deportes']);
+  assert.deepEqual(manifest.catalogs[0].extra[0].options, ['Noticias', 'Deportes']);
+  assert.deepEqual(manifest.catalogs[1].genres, ['España', 'Nicaragua']);
+  assert.deepEqual(manifest.catalogs[1].extra[0].options, ['España', 'Nicaragua']);
+
+  addon.helpers.tvCatalogOptions = async () => null;
+  const fallback = await (await fetchWorker('/manifest.json')).json();
+  assert.ok(fallback.catalogs[0].genres.includes('Deportes'),
+    'sin datos descubiertos el manifiesto publica la lista de respaldo');
+  assert.ok(fallback.catalogs[1].genres.includes('España'));
 });
 
 test('static assets are served through the ASSETS binding with one day of cache', async t => {

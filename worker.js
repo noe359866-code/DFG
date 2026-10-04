@@ -94,8 +94,18 @@ async function manifestResponse(url) {
   // nunca se inyectan cabeceras de la petición en la respuesta.
   const valid = /^[a-z0-9.-]+(?::\d{1,5})?$/i.test(host) && ['http', 'https'].includes(proto);
   const brand = `${proto}://${host}/assets/brand.png`;
+  // Los filtros del catálogo de TV (tipo de contenido y país) se descubren en
+  // la tabla y se publican aquí; sin datos, tvCatalogDefinitions usa las listas
+  // de respaldo. La caché del edge sirve este manifiesto durante cinco minutos.
+  let catalogOptions = null;
+  try {
+    catalogOptions = await addon.helpers.tvCatalogOptions();
+  } catch (err) {
+    console.error('[Manifest] Error descubriendo los filtros de TV:', err && err.message);
+  }
   const body = JSON.stringify({
     ...addon.manifest,
+    catalogs: addon.helpers.tvCatalogDefinitions(catalogOptions),
     ...(valid ? { logo: brand, icon: brand } : {})
   });
   return decorate(new Response(body, {
