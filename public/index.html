@@ -1,36 +1,205 @@
 <!doctype html>
 <html lang="es">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Nexo Play: películas, series y anime en español e inglés, además de canales de TV en vivo clasificados por tipo de contenido y país para Stremio.">
-<meta name="theme-color" content="#090b15">
-<title>Nexo Play · Tu próxima historia</title><link rel="icon" href="/assets/brand.png"><link rel="stylesheet" href="/assets/style.css">
-<script src="/assets/site.js" defer></script>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Nexo Play para Stremio: películas, series, anime y televisión en vivo, con fuentes en español e inglés.">
+  <meta name="theme-color" content="#080a13">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Nexo Play · Dale play a lo que te conecta">
+  <meta property="og:description" content="Películas, series, anime y televisión en vivo en un solo complemento para Stremio.">
+  <meta property="og:image" content="/assets/brand.png">
+  <title>Nexo Play · Tu próxima historia</title>
+  <link rel="icon" type="image/webp" href="/assets/brand-display.webp">
+  <link rel="preload" href="/assets/brand-display.webp" as="image" fetchpriority="high">
+  <link rel="stylesheet" href="/assets/style.css?v=1.6.4">
+  <script src="/assets/site.js?v=1.6.4" defer></script>
 </head>
 <body>
-<header><a class="wordmark" href="/">◈ NEXO PLAY</a><span class="version">STREMIO ADDON <b id="version">1.6.3</b></span></header>
-<main>
-<section class="intro"><div class="eyebrow">DOS IDIOMAS. INFINITAS HISTORIAS.</div><h1>Tu próxima historia,<br><em>más cerca.</em></h1><p>Películas, series y anime en español e inglés, junto con canales de TV en vivo clasificados por tipo de contenido y por país para ver desde Stremio.</p><div class="tags"><span>ES · Español</span><span>EN · English</span><span>Audio dual</span><span>TV en vivo</span></div>
-<div class="actions"><a id="install" class="primary" href="/manifest.json">Añadir a Stremio <span>↗</span></a><button id="copy" type="button">Copiar enlace</button><a href="https://discord.gg/qEcdvvcA4" target="_blank" rel="noopener noreferrer">Soporte en Discord</a></div><p class="feedback" id="feedback" role="status" aria-live="polite"></p>
-<details><summary>¿Cómo se instala?</summary><p>Abre Stremio y pulsa «Añadir a Stremio». También puedes copiar este enlace y pegarlo en la sección Complementos de Stremio.</p><p>Las fuentes de películas y series son torrents (enlaces magnet) con información de idioma y calidad. Los catálogos «Canales de TV» y «Canales por país» ofrecen enlaces directos de TV en vivo configurados por el administrador, con filtro por tipo de contenido (Noticias, Deportes, Películas, Infantil…) y por país.</p><p>¿Problemas para instalar o para encontrar una opción? <a href="https://discord.gg/qEcdvvcA4" target="_blank" rel="noopener noreferrer">Únete al canal de soporte en Discord</a>.</p><label for="url">Enlace del complemento</label><input id="url" readonly aria-label="Enlace del complemento"><a href="/manifest.json">Ver manifiesto →</a></details></section>
-<figure><img src="/assets/brand.png" alt="Símbolo de reproducción Nexo Play en violeta y cian" width="1024" height="1024"><figcaption>DALE PLAY A LO QUE TE CONECTA.</figcaption></figure>
-<section class="finder" aria-labelledby="finder-title">
-<div class="eyebrow" id="release">NOVEDADES · 1.6.3</div><h2 id="finder-title">Busca tus fuentes</h2>
-<p>Los canales de TV se clasifican solos: «Canales de TV» filtra por tipo de contenido (Noticias, Deportes, Películas, Series, Infantil…) y «Canales por país» por país, con los filtros tomados de la propia base de datos. Las fuentes de películas y series mejoran además su selección: descartan las fuentes muertas cuando hay alternativas vivas, recuperan packs de temporada y de serie completa, entienden seeders como «1.2k» y no confunden el nombre de un sitio con una etiqueta de baja calidad.</p>
-<form id="search-form">
-<label for="search-id">ID o enlace de IMDb</label><input id="search-id" required maxlength="250" placeholder="tt0111161 o https://www.imdb.com/title/tt0111161/">
-<div class="search-grid"><label>Tipo<select id="search-type"><option value="movie">Película</option><option value="series">Serie</option><option value="anime">Anime</option></select></label>
-<label>Temporada<input id="search-season" type="number" min="0" max="9999" value="1" disabled required></label>
-<label>Episodio<input id="search-episode" type="number" min="1" max="99999" value="1" disabled required></label></div>
-<button type="submit" id="search-submit">Buscar fuentes</button>
-</form>
-<div class="search-grid filters">
-<label>Idioma<select id="filter-language"><option value="">Todos</option><option>DUAL</option><option>CAST</option><option>LAT</option><option>ESP</option><option>VOSE</option><option>VOST</option><option>SUB</option><option>ENG</option><option>N/D</option></select></label>
-<label>Calidad<select id="filter-quality"><option value="">Todas</option><option>8K</option><option>4K</option><option>1440p</option><option>1080p</option><option>720p</option><option>480p</option><option>360p</option></select></label>
-</div>
-<p id="search-status" role="status" aria-live="polite">Introduce un título de IMDb para consultar sus fuentes.</p>
-<ul id="search-results" aria-label="Fuentes disponibles"></ul>
-<p class="muted">Reproduce las fuentes desde Stremio. La disponibilidad depende de los archivos y sus pares. La lista prioriza primero la mejor fuente en español y la mejor en inglés, seguidas del resto de opciones disponibles.</p>
-</section></main>
-<footer><span>NEXO PLAY <span class="muted">/ Un mundo de historias.</span></span><span>Idiomas y disponibilidad según cada archivo.<br>Utiliza únicamente contenido que tengas derecho a reproducir.</span></footer>
-</body></html>
+  <a class="skip-link" href="#main-content">Saltar al contenido</a>
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="/" aria-label="Nexo Play, inicio">
+        <span class="brand-symbol" aria-hidden="true">◈</span>
+        <span class="brand-name">NEXO<span>PLAY</span></span>
+      </a>
+      <nav class="main-nav" aria-label="Navegación principal">
+        <a href="#experiencias">Experiencias</a>
+        <a href="#explorador">Explorar fuentes</a>
+        <a href="#como-instalar">Cómo instalar</a>
+      </nav>
+      <div class="header-actions">
+        <span class="version">STREMIO ADDON <b id="version">1.6.4</b></span>
+        <a class="button button-small button-nav" href="#como-instalar">Instalar <span aria-hidden="true">↗</span></a>
+      </div>
+    </div>
+  </header>
+
+  <main id="main-content">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="pulse-dot" aria-hidden="true"></span> TU UNIVERSO DE ENTRETENIMIENTO</p>
+        <h1 id="hero-title">Hay una historia<br>esperando tu <span class="gradient-text">play.</span></h1>
+        <p class="hero-lede">Películas, series y anime para descubrir. Canales en vivo para conectar. Todo desde un solo complemento de Stremio.</p>
+        <div class="hero-actions">
+          <a id="install" class="button button-primary" href="/manifest.json">Añadir a Stremio <span aria-hidden="true">↗</span></a>
+          <a class="button button-quiet" href="#explorador"><span class="play-icon" aria-hidden="true">▶</span> Explorar fuentes</a>
+        </div>
+        <div class="hero-meta" aria-label="Características">
+          <span><i class="meta-check" aria-hidden="true">✓</i> Español e inglés</span>
+          <span><i class="meta-check" aria-hidden="true">✓</i> Filtros útiles</span>
+          <span><i class="meta-check" aria-hidden="true">✓</i> TV en vivo</span>
+        </div>
+        <p class="feedback" id="feedback" role="status" aria-live="polite"></p>
+      </div>
+
+      <div class="hero-visual" role="img" aria-label="Vista previa visual del catálogo de TV de Nexo Play">
+        <div class="visual-orbit orbit-one" aria-hidden="true"></div>
+        <div class="visual-orbit orbit-two" aria-hidden="true"></div>
+        <div class="visual-glow" aria-hidden="true"></div>
+        <div class="float-label float-label-top"><span class="live-indicator" aria-hidden="true"></span> DESCUBRE · REPRODUCE · DISFRUTA</div>
+        <div class="showcase-card">
+          <div class="showcase-topline">
+            <span class="showcase-brand"><span aria-hidden="true">◈</span> NEXO PLAY</span>
+            <span class="showcase-live"><i aria-hidden="true"></i> EN VIVO</span>
+          </div>
+          <div class="showcase-art">
+            <img src="/assets/brand-display.webp" alt="" width="640" height="640" fetchpriority="high">
+            <div class="art-caption"><span>CATÁLOGO DESTACADO</span><strong>Canales para<br>cada momento.</strong></div>
+          </div>
+          <div class="showcase-bottom">
+            <span class="showcase-chip">NOTICIAS</span>
+            <span class="showcase-chip">DEPORTES</span>
+            <span class="showcase-chip">POR PAÍS</span>
+            <span class="showcase-arrow" aria-hidden="true">↗</span>
+          </div>
+        </div>
+        <div class="float-label float-label-bottom"><span class="float-label-icon" aria-hidden="true">✦</span><span><b>Tu próxima historia</b><small>está a un play de distancia</small></span></div>
+        <span class="visual-spark spark-one" aria-hidden="true">✳</span>
+        <span class="visual-spark spark-two" aria-hidden="true">✦</span>
+      </div>
+    </section>
+
+    <section class="experience-section" id="experiencias" aria-labelledby="experience-title">
+      <div class="section-intro">
+        <p class="eyebrow">UN COMPLEMENTO. MUCHAS FORMAS DE VER.</p>
+        <h2 id="experience-title">Tu entretenimiento,<br><span class="gradient-text">en su punto.</span></h2>
+        <p>Encuentra fuentes con contexto y explora televisión en directo con filtros pensados para llegar más rápido a lo que buscas.</p>
+      </div>
+      <div class="feature-grid">
+        <article class="feature-card feature-violet">
+          <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><rect x="3.25" y="4.25" width="17.5" height="15.5" rx="3" stroke="currentColor" stroke-width="1.5"/><path d="m10 9 5 3-5 3V9Z" fill="currentColor"/></svg></div>
+          <span class="feature-index">01 / CINE</span>
+          <h3>Películas y series</h3>
+          <p>Fuentes ordenadas con información de calidad, idioma y disponibilidad para elegir con más contexto.</p>
+          <span class="feature-link" aria-hidden="true">↗</span>
+        </article>
+        <article class="feature-card feature-cyan">
+          <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M5 4.75h14A2.25 2.25 0 0 1 21.25 7v10A2.25 2.25 0 0 1 19 19.25H5A2.25 2.25 0 0 1 2.75 17V7A2.25 2.25 0 0 1 5 4.75Z" stroke="currentColor" stroke-width="1.5"/><path d="m10 9 5 3-5 3V9Z" fill="currentColor"/><path d="M7 2.75v2M17 2.75v2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></div>
+          <span class="feature-index">02 / ANIME</span>
+          <h3>Historias para seguir</h3>
+          <p>Mejor selección para series y anime, con episodios y packs presentados de forma clara.</p>
+          <span class="feature-link" aria-hidden="true">↗</span>
+        </article>
+        <article class="feature-card feature-pink">
+          <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="5" width="18" height="14" rx="3" stroke="currentColor" stroke-width="1.5"/><path d="m10 9 5 3-5 3V9Z" fill="currentColor"/><path d="M7 2.75v2M17 2.75v2M7 19.25v2M17 19.25v2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></div>
+          <span class="feature-index">03 / EN DIRECTO</span>
+          <h3>TV por tema y país</h3>
+          <p>Descubre canales configurados por el administrador, agrupados por contenido y país.</p>
+          <span class="feature-link" aria-hidden="true">↗</span>
+        </article>
+      </div>
+    </section>
+
+    <section class="explorer-section" id="explorador" aria-labelledby="finder-title">
+      <div class="explorer-heading">
+        <div>
+          <p class="eyebrow">EXPLORADOR DE FUENTES</p>
+          <h2 id="finder-title">Busca un título.<br><span class="gradient-text">Encuentra tu play.</span></h2>
+        </div>
+        <p>Consulta el mismo servicio que utiliza el complemento y revisa la información de las fuentes antes de abrir Stremio.</p>
+      </div>
+      <div class="finder">
+        <div class="finder-topline">
+          <div class="finder-title-group"><span class="finder-kicker">CONSULTA RÁPIDA</span><h3>¿Qué quieres ver?</h3></div>
+          <span class="release-pill" id="release">NOVEDADES · 1.6.4</span>
+        </div>
+        <form id="search-form">
+          <div class="field field-wide">
+            <label for="search-id">ID o enlace de IMDb</label>
+            <input id="search-id" type="text" required maxlength="250" autocomplete="off" placeholder="tt0111161 o pega un enlace de IMDb">
+          </div>
+          <div class="search-grid">
+            <label>Tipo de contenido
+              <select id="search-type">
+                <option value="movie">Película</option>
+                <option value="series">Serie</option>
+                <option value="anime">Anime</option>
+              </select>
+            </label>
+            <label>Temporada
+              <input id="search-season" type="number" min="0" max="9999" value="1" disabled required inputmode="numeric">
+            </label>
+            <label>Episodio
+              <input id="search-episode" type="number" min="1" max="99999" value="1" disabled required inputmode="numeric">
+            </label>
+          </div>
+          <div class="form-submit-row">
+            <p class="form-hint">Usa un identificador público de IMDb, como <code>tt0111161</code>.</p>
+            <button type="submit" id="search-submit" class="button button-primary"><span>Buscar fuentes</span><span class="button-arrow" aria-hidden="true">↗</span></button>
+          </div>
+        </form>
+        <div class="filter-bar">
+          <span class="filter-label">AFINAR RESULTADOS</span>
+          <div class="search-grid filters">
+            <label>Idioma
+              <select id="filter-language"><option value="">Todos los idiomas</option><option>DUAL</option><option>CAST</option><option>LAT</option><option>ESP</option><option>VOSE</option><option>VOST</option><option>SUB</option><option>ENG</option><option>N/D</option></select>
+            </label>
+            <label>Calidad
+              <select id="filter-quality"><option value="">Todas las calidades</option><option>8K</option><option>4K</option><option>1440p</option><option>1080p</option><option>720p</option><option>480p</option><option>360p</option></select>
+            </label>
+          </div>
+        </div>
+        <div class="results-heading">
+          <div><span class="results-overline">LISTA DE FUENTES</span><p id="search-status" role="status" aria-live="polite">Introduce un título de IMDb para consultar sus fuentes.</p></div>
+          <span class="results-mark" aria-hidden="true">N / P</span>
+        </div>
+        <ul id="search-results" aria-label="Fuentes disponibles" aria-busy="false"></ul>
+        <p class="results-footnote">La disponibilidad cambia según los archivos y sus pares. La lista prioriza las mejores opciones en español e inglés; reproduce las fuentes desde Stremio.</p>
+      </div>
+    </section>
+
+    <section class="install-section" id="como-instalar" aria-labelledby="install-title">
+      <div class="install-copy">
+        <p class="eyebrow">LISTO EN UN MOMENTO</p>
+        <h2 id="install-title">Una vez añadido,<br><span class="gradient-text">todo empieza en Stremio.</span></h2>
+        <p>Instala Nexo Play y vuelve a Stremio para descubrir sus fuentes y catálogos.</p>
+        <a class="button button-primary" href="/manifest.json">Añadir a Stremio <span aria-hidden="true">↗</span></a>
+      </div>
+      <div class="install-steps">
+        <article><span class="step-number">01</span><div><h3>Añade el complemento</h3><p>Abre este enlace en un dispositivo con Stremio instalado.</p></div></article>
+        <article><span class="step-number">02</span><div><h3>Busca o explora</h3><p>Consulta películas, series, anime o los catálogos de TV.</p></div></article>
+        <article><span class="step-number">03</span><div><h3>Elige tu fuente</h3><p>Revisa idioma, calidad y disponibilidad antes de reproducir.</p></div></article>
+        <details class="install-details">
+          <summary>¿Prefieres copiar el enlace?</summary>
+          <p>Pega la dirección del manifiesto en la sección Complementos de Stremio.</p>
+          <div class="copy-row"><label class="visually-hidden" for="url">Enlace del manifiesto</label><input id="url" readonly aria-label="Enlace del complemento"><button id="copy" class="button button-quiet" type="button">Copiar enlace</button></div>
+          <a class="manifest-link" href="/manifest.json">Ver manifiesto JSON <span aria-hidden="true">↗</span></a>
+        </details>
+      </div>
+    </section>
+
+    <section class="community-strip" aria-label="Soporte de la comunidad">
+      <div class="community-icon" aria-hidden="true">✦</div>
+      <div><span class="community-kicker">¿NECESITAS UNA MANO?</span><h2>La comunidad está aquí.</h2></div>
+      <a href="https://discord.gg/qEcdvvcA4" target="_blank" rel="noopener noreferrer">Ir al Discord <span aria-hidden="true">↗</span></a>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <a class="brand footer-brand" href="/" aria-label="Nexo Play, inicio"><span class="brand-symbol" aria-hidden="true">◈</span><span class="brand-name">NEXO<span>PLAY</span></span></a>
+    <p>Un mundo de historias. <span>Usa únicamente contenido que tengas derecho a reproducir.</span></p>
+    <a class="footer-top" href="#main-content">Volver arriba ↑</a>
+  </footer>
+</body>
+</html>

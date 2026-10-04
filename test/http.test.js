@@ -38,6 +38,10 @@ test('routes, image, CORS, methods and safe landing', async t => {
   assert.equal(image.headers.get('content-type'), 'image/png');
   assert.equal(image.headers.get('cache-control'), 'public, max-age=86400, stale-while-revalidate=604800');
   assert.equal(image.headers.get('access-control-allow-origin'), '*');
+  const optimizedArt = await get('/assets/brand-display.webp');
+  assert.equal(optimizedArt.headers.get('content-type'), 'image/webp');
+  assert.ok((await optimizedArt.arrayBuffer()).byteLength < 40_000,
+    'la portada sirve el arte optimizado en lugar del PNG de 1.7 MB');
   assert.equal((await get('/health')).status, 200);
   const missing = await get('/health-anything');
   assert.equal(missing.status, 404);

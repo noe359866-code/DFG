@@ -89,6 +89,11 @@ test('stream success announces edge cache, waits on ctx and is stored once', asy
   assert.equal(calls, 1, 'el edge responde sin volver a llamar al handler');
   assert.equal(second.headers.get('cache-control'), 's-maxage=120, max-age=120, stale-while-revalidate=600, stale-if-error=600, public');
   assert.equal((await second.json()).streams.length, 1);
+
+  const head = await fetchWorker('/stream/movie/tt1234567.json', { ctx, init: { method: 'HEAD' } });
+  assert.equal(head.status, 200);
+  assert.equal(await head.text(), '', 'HEAD devuelve solo cabeceras');
+  assert.equal(calls, 1, 'HEAD reutiliza el GET cacheado sin ejecutar de nuevo el handler');
 });
 
 test('failures and client no-store never reach the edge cache', async t => {
@@ -181,13 +186,15 @@ test('TV catalog query filters use separate edge-cache keys', async t => {
   });
   const tasks = [];
   const ctx = { waitUntil: task => tasks.push(task) };
-  const news = await fetchWorker('/catalog/tv/tv_channels.json?search=Noticias', { ctx });
-  const sports = await fetchWorker('/catalog/tv/tv_channels.json?search=Deportes', { ctx });
+  const news = await fetchWorker('/catalog/tv/tv_channels.json?search=Noticias&skip=0', { ctx });
+  const sports = await fetchWorker('/catalog/tv/tv_channels.json?search=Deportes&skip=0', { ctx });
   assert.equal((await news.json()).metas[0].name, 'Noticias');
   assert.equal((await sports.json()).metas[0].name, 'Deportes');
+  const reorderedNews = await fetchWorker('/catalog/tv/tv_channels.json?skip=0&search=Noticias', { ctx });
+  assert.equal((await reorderedNews.json()).metas[0].name, 'Noticias');
   await Promise.all(tasks);
-  assert.equal(calls, 2, 'cada filtro genera su catálogo una sola vez');
-  assert.equal(caches.puts, 2, 'la query forma parte de la clave de caché del catálogo');
+  assert.equal(calls, 2, 'cada filtro genera su catálogo una sola vez aunque cambie el orden de los parámetros');
+  assert.equal(caches.puts, 2, 'la query normalizada forma parte de la clave del catálogo');
 });
 
 test('manifest publishes the TV filters discovered in the table', async t => {

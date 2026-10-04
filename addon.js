@@ -20,7 +20,12 @@ const TV_CHANNEL_TABLE = 'tv_channels';
 const TV_CHANNEL_ID_PREFIX = 'nexo-tv:';
 const TV_CHANNEL_QUERY_LIMIT = 1000;
 const TV_CHANNEL_PAGE_SIZE = 100;
-const TV_CHANNEL_CACHE_SECONDS = 120;
+// El catálogo cambia poco: cinco minutos de caché edge reducen las consultas
+// frías desde cada punto de presencia sin dejar los canales obsoletos demasiado tiempo.
+const TV_CHANNEL_CACHE_SECONDS = 300;
+const TV_CHANNEL_ROWS_TTL_MS = 30 * 1000;
+const TV_CHANNEL_ROWS_STALE_MS = 10 * 60 * 1000;
+const TV_CHANNEL_DEFAULT_COLUMNS = 'id,name,slug,logo_url,stream_url,stream_type,category,country_code,is_active';
 const TV_CHANNEL_FALLBACK_POSTER = 'https://nexo-player-app.noe359866.workers.dev/assets/brand.png';
 // Filtros que se publican en el manifiesto: el catálogo se lee de la base, así
 // que la lista se descubre ahí y solo se recurre a estos valores por defecto
@@ -85,11 +90,16 @@ function configure(overrides) {
     SUPABASE_ANON_KEY: overrides.SUPABASE_ANON_KEY,
     SUPABASE_SERVICE_ROLE_KEY: overrides.SUPABASE_SERVICE_ROLE_KEY,
     SUPABASE_TORRENT_COLUMNS: overrides.SUPABASE_TORRENT_COLUMNS,
+    SUPABASE_TV_CHANNEL_COLUMNS: overrides.SUPABASE_TV_CHANNEL_COLUMNS,
     DFG_DEBUG: overrides.DFG_DEBUG
   } : null;
   const changed = JSON.stringify(next) !== JSON.stringify(envOverrides);
   envOverrides = next;
-  if (changed) supabaseClient = null;
+  if (changed) {
+    supabaseClient = null;
+    resetTVChannelRowsCache();
+    resetTVGenreOptionsCache();
+  }
 }
 
 function envValue(name) {
@@ -629,6 +639,20 @@ async function runQuery(query, label) {
 // Canales de TV: lectura defensiva de public.tv_channels. Se aceptan nombres
 // habituales de columnas para no imponer un esquema único a la tabla.
 // ---------------------------------------------------------------------------
+const TV_CHANNEL_ID_COLUMNS = ['id', 'channel_id', 'uuid', 'slug', 'code'];
+const TV_CHANNEL_NAME_COLUMNS = ['name', 'channel_name', 'display_name', 'title', 'label', 'channel'];
+const TV_CHANNEL_STREAM_COLUMNS = [
+  'stream_url', 'streaming_url', 'live_url', 'playback_url', 'playlist_url', 'm3u8_url', 'm3u_url', 'stream_link',
+  'video_url', 'content_url', 'source_url', 'channel_url', 'url', 'link', 'src', 'm3u8', 'stream'
+];
+const TV_CHANNEL_POSTER_COLUMNS = ['logo_url', 'logo', 'image_url', 'poster_url', 'poster', 'icon_url', 'icon', 'thumbnail', 'image'];
+const TV_CHANNEL_GENRE_COLUMNS = ['genres', 'category', 'category_name', 'group_title', 'group', 'genre', 'tags'];
+const TV_CHANNEL_DESCRIPTION_COLUMNS = ['description', 'about', 'summary', 'info'];
+const TV_CHANNEL_COUNTRY_COLUMNS = ['country', 'country_name', 'country_code'];
+const TV_CHANNEL_LANGUAGE_COLUMNS = ['language', 'lang', 'audio_language'];
+const TV_CHANNEL_SORT_COLUMNS = ['sort_order', 'display_order', 'position', 'channel_number', 'number', 'order'];
+const TV_CHANNEL_ACTIVE_COLUMNS = ['is_active', 'active', 'enabled', 'is_enabled', 'published', 'visible'];
+
 function channelRowValue(row, columns) {
   if (!row || typeof row !== 'object') return null;
   for (const column of columns) {
@@ -672,7 +696,7 @@ function normalizeChannelUrl(value, allowRtmp = false) {
 function isChannelEnabled(row) {
   if (row.deleted_at !== undefined && row.deleted_at !== null && row.deleted_at !== '') return false;
   if (row.is_deleted === true || row.deleted === true) return false;
-  const value = channelRowValue(row, ['is_active', 'active', 'enabled', 'is_enabled', 'published', 'visible']);
+  const value = channelRowValue(row, TV_CHANNEL_ACTIVE_COLUMNS);
   if (value === null) return true;
   if (value === false || value === 0) return false;
   return !['false', 'f', '0', 'no', 'off', 'inactive', 'disabled', 'archived']
@@ -719,10 +743,29 @@ function isTechnicalTVValue(folded) {
   const words = folded.split(/[^a-z0-9]+/).filter(Boolean);
   return words.length > 0 && words.every(word => TV_TECHNICAL_CATEGORY_WORDS.has(word));
 }
-const TV_CONTENT_TYPE_INDEX = TV_CONTENT_TYPES.map(type => ({
-  name: type.name,
-  aliases: [...new Set(type.aliases.map(foldChannelSearch).filter(Boolean))].sort((a, b) => b.length - a.length)
-}));
+// Los alias y sus expresiones se compilan una sola vez al iniciar el módulo.
+// Compilar una RegExp por alias y por canal en cada catálogo era trabajo
+// repetido y especialmente caro en el límite de CPU de Workers Free.
+const TV_CONTENT_TYPE_LOOKUPS = (() => {
+  const exact = new Map();
+  const matchers = [];
+  for (const type of TV_CONTENT_TYPES) {
+    const aliases = [...new Set(type.aliases.map(foldChannelSearch).filter(Boolean))]
+      .sort((a, b) => b.length - a.length);
+    for (const alias of aliases) {
+      if (!exact.has(alias)) exact.set(alias, type.name);
+      matchers.push({
+        name: type.name,
+        alias,
+        pattern: new RegExp(`(^|[^a-z0-9])${escapeRegExp(alias)}([^a-z0-9]|$)`)
+      });
+    }
+  }
+  // El sort de JavaScript es estable: los empates conservan la prioridad
+  // histórica de TV_CONTENT_TYPES y de sus alias.
+  matchers.sort((a, b) => b.alias.length - a.alias.length);
+  return { exact, matchers };
+})();
 
 // Nombres de país que la tabla puede escribir a mano; se suman los alias que no
 // coinciden con los nombres oficiales en español.
@@ -747,25 +790,18 @@ function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// Palabra completa: «sports hd» contiene «sports», pero «deportistas» no es «deportes».
-function channelWordMatch(foldedText, foldedWord) {
-  if (!foldedText || !foldedWord) return false;
-  return new RegExp(`(^|[^a-z0-9])${escapeRegExp(foldedWord)}([^a-z0-9]|$)`).test(foldedText);
+function canonicalTVContentTypeFolded(folded) {
+  if (!folded) return '';
+  const exact = TV_CONTENT_TYPE_LOOKUPS.exact.get(folded);
+  if (exact) return exact;
+  for (const matcher of TV_CONTENT_TYPE_LOOKUPS.matchers) {
+    if (matcher.pattern.test(folded)) return matcher.name;
+  }
+  return '';
 }
 
 function canonicalTVContentType(value) {
-  const folded = foldChannelSearch(value);
-  if (!folded) return '';
-  const exact = TV_CONTENT_TYPE_INDEX.find(type => type.aliases.includes(folded));
-  if (exact) return exact.name;
-  let best = null;
-  for (const type of TV_CONTENT_TYPE_INDEX) {
-    for (const alias of type.aliases) {
-      if (best && alias.length <= best.length) continue;
-      if (channelWordMatch(folded, alias)) best = { name: type.name, length: alias.length };
-    }
-  }
-  return best ? best.name : '';
+  return canonicalTVContentTypeFolded(foldChannelSearch(value));
 }
 
 // Categorías declaradas en orden: la primera que se reconoce decide el tipo y,
@@ -777,15 +813,14 @@ function channelContentType(genres) {
   for (const value of declared) {
     const folded = foldChannelSearch(value);
     if (!folded || isTechnicalTVValue(folded)) continue;
-    const canonical = canonicalTVContentType(value);
+    const canonical = canonicalTVContentTypeFolded(folded);
     if (canonical) return canonical;
     if (!fallback) fallback = value;
   }
   return fallback || TV_DEFAULT_CONTENT_TYPE;
 }
 
-function countryCodeFromValue(value) {
-  const folded = foldChannelSearch(value);
+function countryCodeFromFolded(folded) {
   if (!folded) return '';
   if (/^[a-z]{2}$/.test(folded)) {
     const code = folded.toUpperCase();
@@ -798,6 +833,10 @@ function countryCodeFromValue(value) {
   return TV_COUNTRY_NAME_INDEX.get(folded) || '';
 }
 
+function countryCodeFromValue(value) {
+  return countryCodeFromFolded(foldChannelSearch(value));
+}
+
 // El país se muestra con su nombre en español; si la tabla trae un valor que no
 // se reconoce (por ejemplo una región o «Europa») se respeta literalmente.
 function countryNameFromValue(value) {
@@ -807,18 +846,23 @@ function countryNameFromValue(value) {
   return code ? (COUNTRY_NAMES[code] || code) : raw;
 }
 
-function channelMatchesTVGenre(channel, genre) {
+function tvGenreMatcher(genre) {
   const folded = foldChannelSearch(genre);
   // Sin filtro (o con el «todos» que algunos clientes envían) no se recorta nada.
-  if (!folded || ['todos', 'todas', 'all', 'any'].includes(folded)) return true;
-  if (foldChannelSearch(channel.contentType) === folded) return true;
-  const canonical = canonicalTVContentType(genre);
-  if (canonical && canonical === channel.contentType) return true;
-  if (channel.genres.some(value => foldChannelSearch(value) === folded)) return true;
-  if (foldChannelSearch(channel.country) === folded) return true;
-  const code = countryCodeFromValue(genre);
-  if (code) return channel.countryCode === code;
-  return false;
+  if (!folded || ['todos', 'todas', 'all', 'any'].includes(folded)) return () => true;
+  const canonical = canonicalTVContentTypeFolded(folded);
+  const code = countryCodeFromFolded(folded);
+  return channel => {
+    if (foldChannelSearch(channel.contentType) === folded) return true;
+    if (canonical && canonical === channel.contentType) return true;
+    if (channel.genres.some(value => foldChannelSearch(value) === folded)) return true;
+    if (foldChannelSearch(channel.country) === folded) return true;
+    return Boolean(code && channel.countryCode === code);
+  };
+}
+
+function channelMatchesTVGenre(channel, genre) {
+  return tvGenreMatcher(genre)(channel);
 }
 
 function encodeBase64Url(value) {
@@ -827,55 +871,100 @@ function encodeBase64Url(value) {
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
 
+const TV_CHANNEL_NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+function tvChannelExplicitId(row) {
+  return channelText(channelRowValue(row, TV_CHANNEL_ID_COLUMNS), 300);
+}
+
 function tvChannelId(row, name = '', streamUrl = '') {
-  const explicitId = channelText(channelRowValue(row, ['id', 'channel_id', 'uuid', 'slug', 'code']), 300);
+  const explicitId = tvChannelExplicitId(row);
   const identity = explicitId ? `id:${explicitId}` : `row:${name}\u0000${streamUrl}`;
   return `${TV_CHANNEL_ID_PREFIX}${encodeBase64Url(identity)}`;
 }
 
-function normalizeTVChannel(row) {
+// Datos normalizados que hacen falta para ordenar y filtrar. No valida URL de
+// stream/logo ni calcula el ID de cada fila: esas operaciones solo hacen falta
+// para los canales de la página devuelta (salvo nombres repetidos al ordenar).
+function tvChannelSortCandidate(row) {
   if (!row || typeof row !== 'object' || !isChannelEnabled(row)) return null;
-  const name = channelText(channelRowValue(row, ['name', 'channel_name', 'display_name', 'title', 'label', 'channel']), 120);
+  const name = channelText(channelRowValue(row, TV_CHANNEL_NAME_COLUMNS), 120);
   if (!name) return null;
-
-  const streamUrl = normalizeChannelUrl(channelRowValue(row, [
-    'stream_url', 'streaming_url', 'live_url', 'playback_url', 'playlist_url', 'm3u8_url', 'm3u_url', 'stream_link',
-    'video_url', 'content_url', 'source_url', 'channel_url', 'url', 'link', 'src', 'm3u8', 'stream'
-  ]), true);
-  const poster = normalizeChannelUrl(channelRowValue(row, [
-    'logo_url', 'logo', 'image_url', 'poster_url', 'poster', 'icon_url', 'icon', 'thumbnail', 'image'
-  ]));
-  const genres = channelTextList(channelRowValue(row, ['genres', 'category', 'category_name', 'group_title', 'group', 'genre', 'tags']));
-  const description = channelText(channelRowValue(row, ['description', 'about', 'summary', 'info']), 300);
-  const countryRaw = channelText(channelRowValue(row, ['country', 'country_name', 'country_code']), 80);
-  const countryCode = countryCodeFromValue(countryRaw);
-  const language = channelText(channelRowValue(row, ['language', 'lang', 'audio_language']), 80);
-  const declaredStreamType = channelText(row.stream_type, 24).toLowerCase();
-  const streamType = ['hls', 'dash', 'embed', 'custom'].includes(declaredStreamType) ? declaredStreamType : 'hls';
-  const sortOrder = toFiniteNumber(channelRowValue(row, ['sort_order', 'display_order', 'position', 'channel_number', 'number', 'order']));
-
+  const sortOrder = toFiniteNumber(channelRowValue(row, TV_CHANNEL_SORT_COLUMNS));
   return {
-    id: tvChannelId(row, name, streamUrl || ''),
-    type: 'tv',
+    row,
+    id: null,
     name,
-    streamUrl,
-    streamType,
-    poster,
-    genres,
-    contentType: channelContentType(genres),
-    description,
-    country: countryNameFromValue(countryRaw),
-    countryCode,
-    language,
     sortOrder: sortOrder !== null && sortOrder >= 0 ? sortOrder : null
   };
 }
 
-function compareTVChannels(a, b) {
+function tvChannelCatalogCandidate(row) {
+  const base = tvChannelSortCandidate(row);
+  if (!base) return null;
+
+  const genres = channelTextList(channelRowValue(row, TV_CHANNEL_GENRE_COLUMNS));
+  const countryRaw = channelText(channelRowValue(row, TV_CHANNEL_COUNTRY_COLUMNS), 80);
+  const countryCode = countryCodeFromValue(countryRaw);
+  return {
+    ...base,
+    type: 'tv',
+    genres,
+    contentType: channelContentType(genres),
+    description: channelText(channelRowValue(row, TV_CHANNEL_DESCRIPTION_COLUMNS), 300),
+    country: countryCode ? (COUNTRY_NAMES[countryCode] || countryCode) : countryRaw,
+    countryCode,
+    language: channelText(channelRowValue(row, TV_CHANNEL_LANGUAGE_COLUMNS), 80)
+  };
+}
+
+function tvChannelCandidateId(candidate) {
+  if (!candidate.id) {
+    const explicitId = tvChannelExplicitId(candidate.row);
+    // Solo hace falta una clave de desempate: no parsear/validar URL hasta que
+    // la fila quede en la página final, incluso si varios canales comparten nombre.
+    const streamUrl = explicitId ? '' : channelText(
+      channelRowValue(candidate.row, TV_CHANNEL_STREAM_COLUMNS), 2000
+    );
+    candidate.id = tvChannelId(candidate.row, candidate.name, streamUrl || '');
+  }
+  return candidate.id;
+}
+
+function completeTVChannelCandidate(candidate) {
+  if (!candidate) return null;
+  const row = candidate.row;
+  const streamUrl = normalizeChannelUrl(
+    channelRowValue(row, TV_CHANNEL_STREAM_COLUMNS), true
+  );
+  const poster = normalizeChannelUrl(
+    channelRowValue(row, TV_CHANNEL_POSTER_COLUMNS)
+  );
+  const declaredStreamType = channelText(row.stream_type, 24).toLowerCase();
+  const { row: _row, id: _candidateId, ...channel } = candidate;
+  return {
+    ...channel,
+    id: tvChannelId(row, candidate.name, streamUrl || ''),
+    streamUrl,
+    streamType: ['hls', 'dash', 'embed', 'custom'].includes(declaredStreamType) ? declaredStreamType : 'hls',
+    poster
+  };
+}
+
+function normalizeTVChannel(row) {
+  return completeTVChannelCandidate(tvChannelCatalogCandidate(row));
+}
+
+function compareTVChannelSortFields(a, b) {
   if (a.sortOrder !== null && b.sortOrder !== null && a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder;
   if (a.sortOrder !== null && b.sortOrder === null) return -1;
   if (a.sortOrder === null && b.sortOrder !== null) return 1;
-  return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }) || a.id.localeCompare(b.id);
+  return TV_CHANNEL_NAME_COLLATOR.compare(a.name, b.name);
+}
+
+function compareTVChannelCandidates(a, b) {
+  const order = compareTVChannelSortFields(a, b);
+  return order || tvChannelCandidateId(a).localeCompare(tvChannelCandidateId(b));
 }
 
 function channelPosterFallback(origin) {
@@ -909,36 +998,104 @@ function foldChannelSearch(value) {
   return channelText(value, 300).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 }
 
-async function fetchTVChannelRows(clientFactory = getSupabaseClient) {
+let tvChannelRowsCache = null;
+let tvChannelRowsPending = null;
+let tvChannelRowsGeneration = 0;
+let tvChannelProjectionFallback = false;
+
+function resetTVChannelRowsCache() {
+  tvChannelRowsCache = null;
+  tvChannelRowsPending = null;
+  tvChannelRowsGeneration++;
+  tvChannelProjectionFallback = false;
+}
+
+function tvChannelColumns() {
+  const raw = cleanEnvValue('SUPABASE_TV_CHANNEL_COLUMNS');
+  if (!raw) return tvChannelProjectionFallback ? '*' : TV_CHANNEL_DEFAULT_COLUMNS;
+  if (!/^[a-z0-9_,\s*]+$/i.test(raw)) return tvChannelProjectionFallback ? '*' : TV_CHANNEL_DEFAULT_COLUMNS;
+  return tvChannelProjectionFallback ? '*' : raw.replace(/\s+/g, '');
+}
+
+function isMissingTVChannelColumn(error) {
+  const code = String(error && error.code || '').toUpperCase();
+  const message = `${error && error.message || ''} ${error && error.details || ''}`;
+  return code === '42703' || code === 'PGRST204' ||
+    /column .+ (?:does not exist|not found|could not find)/i.test(message);
+}
+
+function staleTVChannelRows(now = Date.now()) {
+  if (!tvChannelRowsCache) return null;
+  const age = now - tvChannelRowsCache.at;
+  if (age <= TV_CHANNEL_ROWS_STALE_MS) {
+    return { rows: tvChannelRowsCache.rows, error: null, stale: true };
+  }
+  // No retener el catálogo compacto después de vencer su ventana de respaldo.
+  tvChannelRowsCache = null;
+  return null;
+}
+
+async function readTVChannelRows(clientFactory, { useIsolateCache, generation }) {
+  const cacheIsCurrent = () => !useIsolateCache || generation === tvChannelRowsGeneration;
+  const staleFallback = () => useIsolateCache && cacheIsCurrent()
+    ? staleTVChannelRows()
+    : null;
+
   let supabase;
   try {
     supabase = clientFactory();
-    if (!supabase) return { rows: [], error: new Error('Supabase no configurado') };
-    const result = await runQuery(
-      supabase.from(TV_CHANNEL_TABLE).select('*').limit(TV_CHANNEL_QUERY_LIMIT),
+    if (!supabase) return staleFallback() || { rows: [], error: new Error('Supabase no configurado') };
+
+    let columns = tvChannelColumns();
+    let result = await runQuery(
+      supabase.from(TV_CHANNEL_TABLE).select(columns).limit(TV_CHANNEL_QUERY_LIMIT),
       'consulta public.tv_channels'
     );
-    if (result.error) return { rows: [], error: result.error };
-    return { rows: Array.isArray(result.data) ? result.data : [], error: null };
+    // Las tablas no canónicas conservan compatibilidad: si falta una columna
+    // de la proyección compacta, usa SELECT * una vez y recuerda ese modo para
+    // este isolate. En el esquema compartido solo viajan los campos necesarios.
+    if (result.error && columns !== '*' && isMissingTVChannelColumn(result.error)) {
+      if (useIsolateCache && cacheIsCurrent()) tvChannelProjectionFallback = true;
+      result = await runQuery(
+        supabase.from(TV_CHANNEL_TABLE).select('*').limit(TV_CHANNEL_QUERY_LIMIT),
+        'consulta public.tv_channels (compatibilidad de esquema)'
+      );
+    }
+    if (result.error) return staleFallback() || { rows: [], error: result.error };
+    const rows = Array.isArray(result.data) ? result.data : [];
+    if (useIsolateCache && cacheIsCurrent()) tvChannelRowsCache = { at: Date.now(), rows };
+    return { rows, error: null };
   } catch (error) {
     console.error('[TV] Error leyendo tv_channels:', error && (error.message || error.name) || 'desconocido');
-    return { rows: [], error };
+    return staleFallback() || { rows: [], error };
   }
 }
 
-function tvChannelsFromRows(rows) {
-  return rows.map(normalizeTVChannel).filter(Boolean).sort(compareTVChannels);
+async function fetchTVChannelRows(clientFactory = getSupabaseClient) {
+  const useIsolateCache = clientFactory === getSupabaseClient;
+  const startedAt = Date.now();
+  if (useIsolateCache && tvChannelRowsCache && startedAt - tvChannelRowsCache.at < TV_CHANNEL_ROWS_TTL_MS) {
+    return { rows: tvChannelRowsCache.rows, error: null, cached: true };
+  }
+
+  // Peticiones frías concurrentes comparten la misma lectura de Supabase, en
+  // vez de descargar/procesar hasta mil filas repetidamente en un isolate.
+  if (useIsolateCache && tvChannelRowsPending) return tvChannelRowsPending;
+  const generation = tvChannelRowsGeneration;
+  const pending = readTVChannelRows(clientFactory, { useIsolateCache, generation });
+  if (!useIsolateCache) return pending;
+
+  tvChannelRowsPending = pending;
+  try {
+    return await pending;
+  } finally {
+    if (tvChannelRowsPending === pending) tvChannelRowsPending = null;
+  }
 }
 
-// Descubre los filtros que existen de verdad en la tabla: los tipos de
-// contenido más frecuentes primero y los países por orden alfabético español.
-function tvGenreOptions(channels) {
-  const contentCounts = new Map();
-  const countryCounts = new Map();
-  for (const channel of channels) {
-    if (channel.contentType) contentCounts.set(channel.contentType, (contentCounts.get(channel.contentType) || 0) + 1);
-    if (channel.country) countryCounts.set(channel.country, (countryCounts.get(channel.country) || 0) + 1);
-  }
+// Devuelve los tipos de contenido más frecuentes y los países por orden
+// alfabético español a partir de contadores, sin crear una lista intermedia.
+function tvGenreOptionsFromCounts(contentCounts, countryCounts) {
   const contentTypes = [...contentCounts.entries()]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'es'))
     .slice(0, TV_GENRE_OPTION_LIMIT)
@@ -947,6 +1104,36 @@ function tvGenreOptions(channels) {
     .sort((a, b) => a.localeCompare(b, 'es'))
     .slice(0, TV_GENRE_OPTION_LIMIT);
   return { contentTypes, countries };
+}
+
+function tvGenreOptions(channels) {
+  const contentCounts = new Map();
+  const countryCounts = new Map();
+  for (const channel of channels) {
+    if (channel.contentType) contentCounts.set(channel.contentType, (contentCounts.get(channel.contentType) || 0) + 1);
+    if (channel.country) countryCounts.set(channel.country, (countryCounts.get(channel.country) || 0) + 1);
+  }
+  return tvGenreOptionsFromCounts(contentCounts, countryCounts);
+}
+
+// El manifiesto solo necesita categorías y países; no debe normalizar URLs,
+// logos ni IDs ni crear objetos intermedios por cada canal para descubrir
+// dos listas de filtros.
+function tvGenreOptionsFromRows(rows) {
+  const contentCounts = new Map();
+  const countryCounts = new Map();
+  for (const row of rows) {
+    if (!row || typeof row !== 'object' || !isChannelEnabled(row)) continue;
+    if (!channelText(channelRowValue(row, TV_CHANNEL_NAME_COLUMNS), 120)) continue;
+    const genres = channelTextList(channelRowValue(row, TV_CHANNEL_GENRE_COLUMNS));
+    const contentType = channelContentType(genres);
+    const countryRaw = channelText(channelRowValue(row, TV_CHANNEL_COUNTRY_COLUMNS), 80);
+    const countryCode = countryCodeFromValue(countryRaw);
+    const country = countryCode ? (COUNTRY_NAMES[countryCode] || countryCode) : countryRaw;
+    if (contentType) contentCounts.set(contentType, (contentCounts.get(contentType) || 0) + 1);
+    if (country) countryCounts.set(country, (countryCounts.get(country) || 0) + 1);
+  }
+  return tvGenreOptionsFromCounts(contentCounts, countryCounts);
 }
 
 // Caché en memoria de los filtros descubiertos. El manifiesto se sirve desde
@@ -962,9 +1149,9 @@ async function discoverTVGenreOptions(clientFactory, now) {
   try {
     const result = await fetchTVChannelRows(clientFactory);
     if (!result.error) {
-      const discovered = tvGenreOptions(tvChannelsFromRows(result.rows));
+      const discovered = tvGenreOptionsFromRows(result.rows);
       if (discovered.contentTypes.length || discovered.countries.length) {
-        tvGenreOptionsCache = { at: now, value: discovered };
+        if (!result.stale) tvGenreOptionsCache = { at: now, value: discovered };
         return discovered;
       }
     }
@@ -1029,22 +1216,35 @@ async function tvCatalogHandler({ type, id, extra = {}, origin } = {}, clientFac
 
     const search = foldChannelSearch(extra.search || '');
     const genre = extra.genre || '';
-    let channels = tvChannelsFromRows(result.rows);
+    const foldedGenre = foldChannelSearch(genre);
+    const noGenreFilter = !foldedGenre || ['todos', 'todas', 'all', 'any'].includes(foldedGenre);
+    const sortOnly = !search && noGenreFilter;
+    let candidates = result.rows.map(sortOnly ? tvChannelSortCandidate : tvChannelCatalogCandidate).filter(Boolean);
     if (search) {
-      channels = channels.filter(channel => [
+      candidates = candidates.filter(channel => [
         channel.name, channel.description, channel.country, channel.countryCode,
         channel.contentType, channel.language, ...channel.genres
       ].some(value => foldChannelSearch(value).includes(search)));
     }
-    if (genre) channels = channels.filter(channel => channelMatchesTVGenre(channel, genre));
+    if (!noGenreFilter) {
+      const matchesGenre = tvGenreMatcher(genre);
+      candidates = candidates.filter(matchesGenre);
+    }
 
     const rawSkip = Number(extra.skip || 0);
     const skip = Number.isSafeInteger(rawSkip) && rawSkip > 0 ? Math.min(rawSkip, TV_CHANNEL_QUERY_LIMIT) : 0;
-    const metas = channels.slice(skip, skip + TV_CHANNEL_PAGE_SIZE)
+    // Sin filtros, se ordena usando solo nombre/posición/ID y se normaliza por
+    // completo únicamente la página pedida. Los filtros calculan solo campos
+    // textuales; URL y logo también quedan aplazados hasta esa misma página.
+    const metas = candidates.sort(compareTVChannelCandidates)
+      .slice(skip, skip + TV_CHANNEL_PAGE_SIZE)
+      .map(candidate => sortOnly
+        ? normalizeTVChannel(candidate.row)
+        : completeTVChannelCandidate(candidate))
       .map(channel => buildTVChannelMeta(channel, origin));
     return {
       metas,
-      cacheMaxAge: TV_CHANNEL_CACHE_SECONDS,
+      cacheMaxAge: result.stale ? Math.min(TV_CHANNEL_CACHE_SECONDS, 60) : TV_CHANNEL_CACHE_SECONDS,
       staleRevalidate: 600,
       staleError: 600
     };
@@ -1054,16 +1254,52 @@ async function tvCatalogHandler({ type, id, extra = {}, origin } = {}, clientFac
   }
 }
 
+function decodeTVChannelIdentity(id) {
+  if (typeof id !== 'string' || !id.startsWith(TV_CHANNEL_ID_PREFIX)) return null;
+  const encoded = id.slice(TV_CHANNEL_ID_PREFIX.length);
+  try {
+    const base64 = encoded.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - encoded.length % 4) % 4);
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new TextDecoder().decode(bytes);
+  } catch (_) {
+    return null;
+  }
+}
+
+function findTVChannelById(rows, id) {
+  const identity = decodeTVChannelIdentity(id);
+  if (!identity) return null;
+  if (identity.startsWith('id:')) {
+    const wanted = identity.slice(3);
+    for (const row of rows) {
+      if (tvChannelExplicitId(row) === wanted) return normalizeTVChannel(row);
+    }
+    return null;
+  }
+  if (identity.startsWith('row:')) {
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') continue;
+      const name = channelText(channelRowValue(row, TV_CHANNEL_NAME_COLUMNS), 120);
+      if (!name) continue;
+      const streamUrl = normalizeChannelUrl(channelRowValue(row, TV_CHANNEL_STREAM_COLUMNS), true) || '';
+      if (`row:${name}\u0000${streamUrl}` === identity) return normalizeTVChannel(row);
+    }
+  }
+  return null;
+}
+
 async function tvMetaHandler({ type, id, origin } = {}, clientFactory = getSupabaseClient) {
   if (type !== 'tv' || typeof id !== 'string' || !id.startsWith(TV_CHANNEL_ID_PREFIX)) return { meta: {} };
   try {
     const result = await fetchTVChannelRows(clientFactory);
     if (result.error) return { meta: {} };
-    const channel = tvChannelsFromRows(result.rows).find(item => item.id === id);
+    const channel = findTVChannelById(result.rows, id);
     if (!channel) return { meta: {}, cacheMaxAge: 60 };
     return {
       meta: buildTVChannelMeta(channel, origin),
-      cacheMaxAge: TV_CHANNEL_CACHE_SECONDS,
+      cacheMaxAge: result.stale ? Math.min(TV_CHANNEL_CACHE_SECONDS, 60) : TV_CHANNEL_CACHE_SECONDS,
       staleRevalidate: 600,
       staleError: 600
     };
@@ -1078,7 +1314,7 @@ async function tvStreamHandler({ type, id } = {}, clientFactory = getSupabaseCli
   try {
     const result = await fetchTVChannelRows(clientFactory);
     if (result.error) return { streams: [] };
-    const channel = tvChannelsFromRows(result.rows).find(item => item.id === id);
+    const channel = findTVChannelById(result.rows, id);
     if (!channel || !channel.streamUrl) return { streams: [], cacheMaxAge: 60 };
 
     const url = new URL(channel.streamUrl);
@@ -1095,7 +1331,7 @@ async function tvStreamHandler({ type, id } = {}, clientFactory = getSupabaseCli
     };
     return {
       streams: [stream],
-      cacheMaxAge: TV_CHANNEL_CACHE_SECONDS,
+      cacheMaxAge: result.stale ? Math.min(TV_CHANNEL_CACHE_SECONDS, 60) : TV_CHANNEL_CACHE_SECONDS,
       staleRevalidate: 600,
       staleError: 600
     };
@@ -1141,8 +1377,29 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
         const magnet = parseMagnetUrl(row.magnet_url || row.magnetUrl || row.magnet);
         if (!isValidInfoHash(infoHash)) infoHash = extractInfoHashFromMagnet(magnet);
         if (!isValidInfoHash(infoHash)) return null;
-        return buildStreamEntry(row, infoHash, extractTrackersFromMagnet(magnet), imdbId,
-          extractTitleFromMagnet(magnet), packSeason, season, seriesPack);
+
+        const magnetTitle = extractTitleFromMagnet(magnet);
+        const metadata = { ...row, name: row.name || magnetTitle };
+        const rawLeechers = parseCount(row.leechers ?? row.leechs ?? row.peers);
+        return {
+          // Solo se calculan los campos de ranking ahora. Crear nombres largos,
+          // badges, trackers y títulos detallados se aplaza a los 25 elegidos.
+          row: metadata,
+          sourceRow: row,
+          infoHash: infoHash.toLowerCase(),
+          resolution: getResolutionTag(metadata),
+          langTag: getLanguageTag(metadata),
+          seeders: Math.max(0, parseCount(row.seeders ?? row.seeds ?? row.seed) ?? 0),
+          leecherCount: rawLeechers === null || rawLeechers < 0 ? null : rawLeechers,
+          sizeBytes: parseSizeBytes(row) || 0,
+          fileIdx: streamFileIndex(row),
+          magnet,
+          imdbId,
+          magnetTitle,
+          seasonPack: packSeason,
+          season,
+          seriesPack
+        };
       })
       .filter(Boolean);
 
@@ -1255,8 +1512,7 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
     streamEntries.sort(compareStreamEntries);
     const seen = new Set();
     const dedupedEntries = streamEntries.filter(entry => {
-      const stream = entry.stream;
-      const key = `${stream.infoHash}:${stream.fileIdx ?? ''}`;
+      const key = `${entry.infoHash}:${entry.fileIdx ?? ''}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -1314,7 +1570,10 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
       selected.add(entry);
     }
 
-    const streams = bestByLanguage.slice(0, MAX_STREAMS).map(entry => entry.stream);
+    const streams = bestByLanguage.slice(0, MAX_STREAMS).map(entry => buildStreamEntry(
+      entry.sourceRow, entry.infoHash, extractTrackersFromMagnet(entry.magnet), entry.imdbId,
+      entry.magnetTitle, entry.seasonPack, entry.season, entry.seriesPack
+    ).stream);
 
     console.log(`[Stream] → Enviando ${streams.length} streams válidos`);
     return { streams, cacheMaxAge: 120, staleRevalidate: 600, staleError: 600 };
@@ -1573,6 +1832,12 @@ function compareStreamEntries(a, b) {
   return a.infoHash < b.infoHash ? -1 : a.infoHash > b.infoHash ? 1 : 0;
 }
 
+function streamFileIndex(row) {
+  const raw = row.file_index ?? row.file_idx ?? row.fileIndex ?? row.fileIdx;
+  const numeric = raw === '' || raw === null || raw === undefined ? NaN : Number(raw);
+  return Number.isSafeInteger(numeric) && numeric >= 0 ? numeric : undefined;
+}
+
 // seasonPack: número de temporada cuando la fila es un pack completo en vez
 // del episodio exacto (se etiqueta para que el usuario sepa qué descarga).
 // seriesPack: la fila es un pack de la serie entera (season/episode nulos).
@@ -1638,9 +1903,7 @@ function buildStreamEntry(row, infoHash, magnetTrackers = [], imdbId = '', magne
   // trackers, con fallback a trackers públicos de alta disponibilidad.
   const trackers = buildTrackers(row.trackers, magnetTrackers);
 
-  const rawFileIdx = row.file_index ?? row.file_idx ?? row.fileIndex ?? row.fileIdx;
-  const numericFileIdx = rawFileIdx === '' || rawFileIdx === null || rawFileIdx === undefined ? NaN : Number(rawFileIdx);
-  const fileIdx = Number.isSafeInteger(numericFileIdx) && numericFileIdx >= 0 ? numericFileIdx : undefined;
+  const fileIdx = streamFileIndex(row);
 
   // Identifica título + temporada + calidad + idioma: la reproducción continua
   // solo agrupa episodios de la misma temporada y nunca títulos distintos, así
@@ -1684,4 +1947,4 @@ function buildStream(row, infoHash, magnetTrackers = [], imdbId = '') {
 const addonInterface = builder.getInterface();
 module.exports = addonInterface;
 
-module.exports.helpers = { numericNonNegative, debugEnabled, metadataScore, parseCount, sameContentFamily, parseTrackerList, parseStremioId, getLanguageTag, getResolutionTag, detectLanguageTag, formatSizeGB, parseSizeBytes, extractInfoHashFromMagnet, extractTrackersFromMagnet, extractTitleFromMagnet, sanitizeOneLine, buildStreamEntry, compareStreamEntries, streamHandler, createCachedStreamHandler, cachedStreamHandler, streamResourceHandler, tvChannelId, normalizeTVChannel, buildTVChannelMeta, canonicalTVContentType, channelContentType, countryCodeFromValue, countryNameFromValue, channelMatchesTVGenre, tvGenreOptions, tvCatalogOptions, tvCatalogDefinitions, resetTVGenreOptionsCache, tvCatalogHandler, tvMetaHandler, tvStreamHandler, getSupabaseClient, configure, configStatus, normalizeSupabaseUrl, cleanEnvValue, torrentColumns };
+module.exports.helpers = { numericNonNegative, debugEnabled, metadataScore, parseCount, sameContentFamily, parseTrackerList, parseStremioId, getLanguageTag, getResolutionTag, detectLanguageTag, formatSizeGB, parseSizeBytes, extractInfoHashFromMagnet, extractTrackersFromMagnet, extractTitleFromMagnet, sanitizeOneLine, buildStreamEntry, compareStreamEntries, streamHandler, createCachedStreamHandler, cachedStreamHandler, streamResourceHandler, tvChannelId, normalizeTVChannel, buildTVChannelMeta, canonicalTVContentType, channelContentType, countryCodeFromValue, countryNameFromValue, channelMatchesTVGenre, tvGenreOptions, tvGenreOptionsFromRows, tvCatalogOptions, tvCatalogDefinitions, resetTVGenreOptionsCache, fetchTVChannelRows, tvChannelColumns, resetTVChannelRowsCache, findTVChannelById, tvCatalogHandler, tvMetaHandler, tvStreamHandler, getSupabaseClient, configure, configStatus, normalizeSupabaseUrl, cleanEnvValue, torrentColumns };

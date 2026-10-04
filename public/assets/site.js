@@ -78,8 +78,17 @@ const searchStatus = document.getElementById('search-status');
 const results = document.getElementById('search-results');
 const language = document.getElementById('filter-language');
 const quality = document.getElementById('filter-quality');
+const searchSubmit = document.getElementById('search-submit');
+const searchButtonText = searchSubmit.querySelector('span');
+const defaultSubmitLabel = searchButtonText?.textContent || 'Buscar fuentes';
 let sources = [];
 let controller;
+function setSearchPending(pending) {
+  searchSubmit.disabled = pending;
+  searchSubmit.setAttribute('aria-busy', String(pending));
+  if (searchButtonText) searchButtonText.textContent = pending ? 'Buscando…' : defaultSubmitLabel;
+  searchStatus.classList.toggle('is-loading', pending);
+}
 function parseStreamHeader(name) {
   if (!name) return { lang: null, quality: null, badges: [] };
   const lines = name.split('\n');
@@ -98,19 +107,16 @@ function parseStreamHeader(name) {
 }
 
 function renderSources() {
-  const filtered = sources.filter(stream => {
-    const meta = parseStreamHeader(stream.name);
-    const langOk = !language.value || meta.lang === language.value;
-    const qualityOk = !quality.value || meta.quality === quality.value;
-    return langOk && qualityOk;
-  });
+  searchStatus.classList.remove('is-loading');
+  const filtered = sources.map(stream => ({ stream, meta: parseStreamHeader(stream.name) }))
+    .filter(({ meta }) => (!language.value || meta.lang === language.value) &&
+      (!quality.value || meta.quality === quality.value));
   results.replaceChildren();
-  for (const stream of filtered) {
+  for (const { stream, meta } of filtered) {
     const item = document.createElement('li');
     const heading = document.createElement('strong');
     const badgeRow = document.createElement('div');
     const details = document.createElement('p');
-    const meta = parseStreamHeader(stream.name);
     badgeRow.className = 'badges';
     if (meta.lang) {
       const langBadge = document.createElement('span');
@@ -132,7 +138,6 @@ function renderSources() {
     }
     const titleLines = (stream.title || '').split('\n');
     heading.textContent = titleLines[0] || 'Fuente';
-    details.innerHTML = '';
     for (const line of titleLines.slice(1)) {
       if (!line.trim()) continue;
       const lineEl = document.createElement('span');
@@ -165,6 +170,13 @@ searchForm.addEventListener('submit', async event => {
     } catch (_) { /* validation below */ }
   }
   if (!id) {
+    controller?.abort();
+    controller = null;
+    setSearchPending(false);
+    sources = [];
+    results.replaceChildren();
+    results.setAttribute('aria-busy', 'false');
+    searchStatus.classList.remove('is-loading');
     searchStatus.textContent = 'Sustituye el texto por un ID (tt0111161) o un enlace de título de IMDb válido.';
     return;
   }
@@ -176,6 +188,7 @@ searchForm.addEventListener('submit', async event => {
   sources = [];
   results.replaceChildren();
   searchStatus.textContent = 'Buscando fuentes…';
+  setSearchPending(true);
   results.setAttribute('aria-busy', 'true');
   try {
     const response = await fetch(`/stream/${searchType.value}/${encodeURIComponent(id)}.json`, { signal: request.signal });
@@ -186,11 +199,17 @@ searchForm.addEventListener('submit', async event => {
     sources = data.streams;
     renderSources();
   } catch (_) {
-    if (controller === request) searchStatus.textContent = 'No se pudo completar la consulta. Inténtalo de nuevo.';
+    if (controller === request) {
+      searchStatus.textContent = request.signal.aborted
+        ? 'La consulta tardó demasiado. Inténtalo de nuevo.'
+        : 'No se pudo completar la consulta. Inténtalo de nuevo.';
+      searchStatus.classList.remove('is-loading');
+    }
   } finally {
     clearTimeout(timeout);
     if (controller === request) {
       controller = null;
+      setSearchPending(false);
       results.setAttribute('aria-busy', 'false');
     }
   }
