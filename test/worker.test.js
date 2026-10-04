@@ -123,6 +123,68 @@ test('failures and client no-store never reach the edge cache', async t => {
   assert.equal(caches.puts, 1, 'no-store del cliente tampoco almacena en el edge');
 });
 
+test('TV catalog, metadata and stream routes are exposed by the Worker', async t => {
+  const originalCatalog = addon.helpers.tvCatalogHandler;
+  const originalMeta = addon.helpers.tvMetaHandler;
+  const originalStream = addon.helpers.tvStreamHandler;
+  const calls = [];
+  addon.helpers.tvCatalogHandler = async args => {
+    calls.push(['catalog', args]);
+    return { metas: [{ id: 'nexo-tv:aWQ6MQ', type: 'tv', name: 'Canal Uno' }], cacheMaxAge: 120 };
+  };
+  addon.helpers.tvMetaHandler = async args => {
+    calls.push(['meta', args]);
+    return { meta: { id: args.id, type: 'tv', name: 'Canal Uno' }, cacheMaxAge: 120 };
+  };
+  addon.helpers.tvStreamHandler = async args => {
+    calls.push(['stream', args]);
+    return { streams: [{ url: 'https://video.example/live.m3u8' }], cacheMaxAge: 120 };
+  };
+  t.after(() => {
+    addon.helpers.tvCatalogHandler = originalCatalog;
+    addon.helpers.tvMetaHandler = originalMeta;
+    addon.helpers.tvStreamHandler = originalStream;
+  });
+
+  const catalogResponse = await fetchWorker('/catalog/tv/tv_channels/search=Noticias&skip=100.json');
+  assert.equal(catalogResponse.status, 200);
+  assert.equal(catalogResponse.headers.get('cache-control'), 's-maxage=120, max-age=120, public');
+  assert.equal((await catalogResponse.json()).metas[0].name, 'Canal Uno');
+  assert.deepEqual(calls[0][1].extra, { search: 'Noticias', skip: '100' });
+  assert.equal(calls[0][1].origin, 'https://example.com');
+
+  const channelId = 'nexo-tv:aWQ6MQ';
+  const metadata = await fetchWorker(`/meta/tv/${channelId}.json`);
+  assert.equal((await metadata.json()).meta.id, channelId);
+  const playback = await fetchWorker(`/stream/tv/${channelId}.json`);
+  assert.equal((await playback.json()).streams[0].url, 'https://video.example/live.m3u8');
+  assert.deepEqual(calls.slice(1).map(call => call[0]), ['meta', 'stream']);
+});
+
+test('TV catalog query filters use separate edge-cache keys', async t => {
+  const caches = mockCaches();
+  globalThis.caches = caches;
+  const original = addon.helpers.tvCatalogHandler;
+  let calls = 0;
+  addon.helpers.tvCatalogHandler = async ({ extra }) => {
+    calls++;
+    return { metas: [{ type: 'tv', name: extra.search }], cacheMaxAge: 60 };
+  };
+  t.after(() => {
+    addon.helpers.tvCatalogHandler = original;
+    delete globalThis.caches;
+  });
+  const tasks = [];
+  const ctx = { waitUntil: task => tasks.push(task) };
+  const news = await fetchWorker('/catalog/tv/tv_channels.json?search=Noticias', { ctx });
+  const sports = await fetchWorker('/catalog/tv/tv_channels.json?search=Deportes', { ctx });
+  assert.equal((await news.json()).metas[0].name, 'Noticias');
+  assert.equal((await sports.json()).metas[0].name, 'Deportes');
+  await Promise.all(tasks);
+  assert.equal(calls, 2, 'cada filtro genera su catálogo una sola vez');
+  assert.equal(caches.puts, 2, 'la query forma parte de la clave de caché del catálogo');
+});
+
 test('static assets are served through the ASSETS binding with one day of cache', async t => {
   const assets = require('../server').assets;
   const landing = await fetchWorker('/', { env: { ASSETS: assets } });

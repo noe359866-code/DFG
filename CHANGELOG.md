@@ -1,5 +1,16 @@
 # Historial de cambios
 
+## 1.6.2 — 2026-10-04
+
+**Canales de TV en vivo desde Supabase:** el addon ahora publica un catálogo de televisión propio en Stremio, además de las fuentes existentes de películas, series y anime.
+
+- **Catálogo y fichas:** declara el tipo `tv`, el catálogo «Canales de TV» y recursos para catálogo, metadatos y streams.
+- **Tabla `public.tv_channels`:** mapea la estructura Supabase compartida (`id`, `name`, `slug`, `logo_url`, `stream_url`, `stream_type`, `category`, `country_code`, `is_active`); no realiza migraciones ni scraping.
+- **Búsqueda y reproducción:** admite búsqueda, filtro de categoría y paginación; `hls`, `dash` y `custom` se ofrecen como streams directos, mientras `embed` se devuelve como enlace externo.
+- **Caché y seguridad:** respuestas del catálogo, metadatos y streams se cachean en el edge cuando Supabase responde correctamente; se rechazan esquemas de URL no reproducibles. Para la clave ANON hace falta una política RLS SELECT en `tv_channels`.
+- **Pruebas y documentación:** se añaden pruebas para el mapeo de filas, las rutas Fetch y la caché de filtros, y se documentan los campos reconocidos.
+- **Versión sincronizada:** `package.json`, `package-lock.json`, manifiesto y página pública quedan en `1.6.2`.
+
 ## 1.6.1 — 2026-10-03
 
 **La web deja de poder mostrar una versión que no es la suya:** la portada lee la versión del Worker que responde, avisa cuando se visita un Preview congelado y se documenta qué URL es la publicada.

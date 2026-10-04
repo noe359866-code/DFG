@@ -1,10 +1,18 @@
-# Nexo Play · 1.6.1
+# Nexo Play · 1.6.2
 
 ![Nexo Play](public/assets/brand.png)
 
-**Tu próxima historia, más cerca.** Películas, series y anime en español e inglés. Encuentra opciones de reproducción con información de idioma y calidad, en un solo lugar.
+**Tu próxima historia, más cerca.** Películas, series y anime en español e inglés, junto con un catálogo de canales de TV en vivo.
 
-Complemento de fuentes de reproducción para Stremio. No incluye un catálogo propio; las opciones aparecen en las fichas compatibles. Idiomas, calidad y disponibilidad dependen de los archivos disponibles. Utiliza únicamente contenido que tengas derecho a reproducir.
+Complemento para Stremio con fuentes de reproducción en fichas compatibles y un catálogo propio de **Canales de TV**. Los canales se leen desde `public.tv_channels`; utiliza únicamente contenidos y enlaces que tengas derecho a reproducir.
+
+## Novedades de 1.6.2
+
+- **Catálogo de TV en vivo:** Stremio muestra un catálogo llamado «Canales de TV» leído desde la tabla `tv_channels` de Supabase. Cada elemento usa su nombre, logo, categoría y enlace de reproducción; permite búsqueda, filtro por género/categoría y paginación.
+- **Reproducción:** los tipos `hls`, `dash` y `custom` devuelven `stream_url` como stream directo de tipo `tv`; `embed` aparece como enlace externo. También se exponen metadatos y se ocultan filas con `is_active=false`.
+- **Esquema de Supabase:** compatible con la tabla `public.tv_channels` compartida: usa `id`, `name`, `slug`, `logo_url`, `stream_url`, `stream_type`, `category`, `country_code` e `is_active`.
+- **Permisos de Supabase:** la clave `anon` necesita política RLS `SELECT` para las tablas `torrents` y `tv_channels`.
+- **Versión sincronizada:** manifiesto, paquete y página anuncian `1.6.2`; puede ser necesario actualizar/reinstalar el complemento en Stremio para que descargue el catálogo del manifiesto nuevo.
 
 ## Novedades de 1.6.1
 
@@ -58,7 +66,7 @@ Ejecuta `npm run benchmark` para una medición **simulada** de consultas concurr
 
 ## Buscador incorporado en 1.2.5
 
-Nuevo buscador web de fuentes por **ID o enlace de IMDb**, con filtros de idioma y calidad. Selecciona película, serie o anime; para episodios indica temporada y número de episodio (temporada cero para especiales). Consulta fuentes sin salir de la página y reprodúcelas desde Stremio. No busca por nombre ni añade un catálogo propio.
+Buscador web de fuentes por **ID o enlace de IMDb**, con filtros de idioma y calidad. Selecciona película, serie o anime; para episodios indica temporada y número de episodio (temporada cero para especiales). Consulta fuentes sin salir de la página y reprodúcelas desde Stremio. El catálogo independiente de canales de TV está disponible dentro de Stremio.
 
 El parche reutiliza consultas recientes y simultáneas, elimina duplicados con menos trabajo y corrige metadatos obtenidos de enlaces magnet. No se promete una velocidad de reproducción: depende de la red y de los pares disponibles.
 
@@ -134,7 +142,7 @@ Estas instrucciones son para administradores, no forman parte de la descripción
 
 - `SUPABASE_URL`: URL del proyecto. Se acepta con o sin `https://` y con barra final; se recorta de espacios y comillas.
 - `SUPABASE_ANON_KEY`: clave para consultas con políticas RLS de solo lectura.
-- `SUPABASE_SERVICE_ROLE_KEY`: alternativa privilegiada, **solo en servidor**. Si existe tiene prioridad; evita utilizarla si no es necesaria. El addon avisa en los logs si la usa; para lectura se recomienda ANON con una política SELECT en `torrents`.
+- `SUPABASE_SERVICE_ROLE_KEY`: alternativa privilegiada, **solo en servidor**. Si existe tiene prioridad; evita utilizarla si no es necesaria. El addon avisa en los logs si la usa; para lectura se recomienda ANON con políticas SELECT en `torrents` y `tv_channels`.
 - `SUPABASE_TORRENT_COLUMNS` (opcional): lista de columnas separadas por comas. Si se omite, se usa `*`; al restringirla, conserva al menos los campos de consulta y los metadatos que quieras mostrar (`imdb_id`, `season`, `episode`, hash o magnet, `seeders`, título, idioma, calidad y tamaño).
 - Los placeholders de `.env.example` / `.dev.vars.example` se ignoran solos. `/health` indica `supabase.configured`, el estado de formato de la URL y si hay una clave (`present`/`missing`), sin revelar su tipo ni valor.
 - No publiques `.env` ni credenciales. Ocultar la infraestructura en la descripción no sustituye RLS ni el control de acceso. Si alguna clave real fue publicada, revócala y rótala.
@@ -143,14 +151,16 @@ La aplicación consulta `torrents` por `imdb_id`; para series/anime una consulta
 
 El orden final agrupa primero la salud de la fuente: 5 o más seeders, de 1 a 4 seeders y sin seeders; luego prioriza resolución (8K, 4K, 1440p, 1080p, 720p, 576p, 480p, 360p), idioma (DUAL, CAST, LAT, ESP, VOSE, VOST, SUB, ENG), seeders, leechers y tamaño. El hash rompe el último empate, así que dos peticiones con las mismas filas devuelven exactamente la misma lista. El idioma se lee primero de la columna de audio y, si no declara nada, del nombre del release; la resolución reconoce alturas y etiquetas (`4K`, `UHD`, `1440p`, `1080i`…) con límites de palabra, de modo que un título como `14km` no se toma por un 4K.
 
+El catálogo consulta `public.tv_channels` (la estructura documentada incluye `id`, `name`, `slug`, `logo_url`, `stream_url`, `stream_type`, `category`, `country_code` e `is_active`) con `SELECT *`, hasta 1000 filas y páginas de 100 canales. Usa `id` como identificador estable, muestra `name`, `logo_url`, `category` y `country_code`, y omite filas donde `is_active` es falso. `stream_type=hls`, `dash` y `custom` devuelven `stream_url` como stream directo; `embed` se ofrece como enlace externo. Se admiten búsqueda, filtro por categoría y `skip`. No se incluye guía EPG: la tabla solo aporta canales y enlaces. Con `SUPABASE_ANON_KEY`, configura una política RLS `SELECT` en `tv_channels` (además de la política existente para `torrents`).
+
 Campos utilizados: `info_hash` (alternativas `infoHash`, `hash`) o `magnet_url` (`magnetUrl`, `magnet`), título, idioma/audio, resolución/calidad y tamaño (`size_bytes`, `size_gb` o `size` con unidades en inglés, decimales con coma o punto, hasta TB). Opcionalmente `file_idx`/`fileIdx` indica el archivo del torrent y `leechers` afina el orden dentro de un mismo tramo. Los campos de metadatos ausentes se muestran como no indicados, sin inventar idioma, subtítulos ni calidad.
 
 Los magnets admiten BTIH hexadecimal o base32; las filas sin hash válido se descartan. Los trackers del magnet original (`tr=`) y los de la columna `trackers` viajan en `sources` de cada stream, normalizados y sin duplicados, para acelerar la búsqueda de pares. Las consultas tienen un límite de cuatro segundos por intento. Cada instancia mantiene hasta 250 respuestas en memoria con 120 segundos de frescura y hasta 600 segundos adicionales para revalidar fuentes no vacías; la revalidación obsoleta se bloquea por clave, pero las peticiones frías concurrentes no comparten promesas de I/O. No se comparte caché entre instancias ni se almacenan errores: tras un fallo de la base de datos no se repite la consulta hasta pasados quince segundos, y las respuestas vacías confirmadas se cachean sesenta segundos. Los resultados con torrents anuncian 120 segundos de caché (navegador y edge) más diez minutos de `stale-while-revalidate` y `stale-if-error`; los fallos no anuncian caché. El manifiesto anuncia `max-age`/`s-maxage` de cinco minutos con `stale-while-revalidate` de una hora, sirve `304` con su ETag y cachea en el borde ignorando la cadena de consulta. `/health` confirma que la aplicación responde y que las variables de Supabase tienen formato válido (sin exponer valores); no comprueba la conectividad con la base de datos.
 
 ## Estructura
 
-- `addon.js`: manifiesto, validación, consulta y formato de streams.
-- `worker.js`: rutas sobre la API Fetch (manifiesto, streams, salud, estáticos), CORS y caché del edge con la Cache API.
+- `addon.js`: manifiesto, catálogo/metadatos de TV, consulta y formato de streams.
+- `worker.js`: rutas sobre la API Fetch (manifiesto, catálogo, metadatos, streams, salud y estáticos), CORS y caché del edge con la Cache API.
 - `worker.mjs`: punto de entrada ESM que expone el manejador a Wrangler.
 - `server.js`: adaptador local del mismo manejador al servidor HTTP de Node.
 - `wrangler.toml`: configuración del Worker y binding de estáticos.
