@@ -1,10 +1,19 @@
-# Nexo Play · 1.6.2
+# Nexo Play · 1.7.0
 
 ![Nexo Play](public/assets/brand.png)
 
-**Tu próxima historia, más cerca.** Películas, series y anime en español e inglés, junto con un catálogo de canales de TV en vivo.
+**Tu próxima historia, más cerca.** Películas, series y anime en español e inglés, junto con un catálogo de canales de TV en vivo clasificado **por tipo de contenido y por país**.
 
 Complemento para Stremio con fuentes de reproducción en fichas compatibles y un catálogo propio de **Canales de TV**. Los canales se leen desde `public.tv_channels`; utiliza únicamente contenidos y enlaces que tengas derecho a reproducir.
+
+## Novedades de 1.7.0
+
+- **Los canales se clasifican solos:** la categoría declarada en la tabla (`category`, `genres`, `group_title`…) se agrupa en tipos de contenido legibles —Noticias, Deportes, Películas, Series, Infantil, Documentales, Música, Cultura, Entretenimiento, Estilo de vida, Viajes, Tecnología, Religión, Compras y General— reconociendo alias en español e inglés («Sports HD» → Deportes, «TV Shows» → Series, «Dibujos animados» → Infantil). Las categorías que no se reconocen se respetan tal cual y las que vienen vacías caen en «General». No hay que tocar la base de datos.
+- **Dos catálogos en Stremio:** «Canales de TV» filtra por tipo de contenido y «Canales por país» por país, cada uno con su desplegable de filtros y su búsqueda. Los valores salen de la propia tabla: se publican en el manifiesto los tipos y países que existen de verdad (hasta 80 de cada uno, los tipos ordenados por número de canales y los países alfabéticamente). Si la base no responde o el despliegue no tiene secretos, se anuncian listas de respaldo para que el filtro nunca aparezca vacío.
+- **País en español y en cualquier formato:** `country_code` puede venir como `ES`, `ESP`, `es` o incluso «España»; todos se resuelven al mismo país y la ficha muestra «España», «Nicaragua» o «México» en lugar del código. La tabla ISO 3166 vive en `tv-countries.js` (250 países, sin dependencias ni llamadas externas).
+- **Filtros combinables:** `search` sigue buscando por nombre, descripción, tipo, país e idioma, y el filtro admite tanto el tipo/catálogo normalizado como el valor original de la tabla (`genre=deportes` y `genre=Deportes HD` funcionan igual). La paginación (`skip`) se mantiene.
+- **Filtros descubiertos con coste acotado:** la consulta que los descubre se cachea en memoria diez minutos (una hora de ventana obsoleta si la base falla) y el manifiesto se sigue sirviendo desde la caché del edge; la primera consulta espera como mucho 2,5 segundos y, a partir de ahí, el refresco ocurre en segundo plano sin bloquear el manifiesto.
+- **Versión sincronizada:** `package.json`, `package-lock.json`, manifiesto y página pública quedan en `1.7.0`. Stremio guarda el manifiesto en caché: si acabas de actualizar y no ves «Canales por país» ni los filtros nuevos, quita y vuelve a añadir el complemento.
 
 ## Novedades de 1.6.2
 
@@ -151,7 +160,17 @@ La aplicación consulta `torrents` por `imdb_id`; para series/anime una consulta
 
 El orden final agrupa primero la salud de la fuente: 5 o más seeders, de 1 a 4 seeders y sin seeders; luego prioriza resolución (8K, 4K, 1440p, 1080p, 720p, 576p, 480p, 360p), idioma (DUAL, CAST, LAT, ESP, VOSE, VOST, SUB, ENG), seeders, leechers y tamaño. El hash rompe el último empate, así que dos peticiones con las mismas filas devuelven exactamente la misma lista. El idioma se lee primero de la columna de audio y, si no declara nada, del nombre del release; la resolución reconoce alturas y etiquetas (`4K`, `UHD`, `1440p`, `1080i`…) con límites de palabra, de modo que un título como `14km` no se toma por un 4K.
 
-El catálogo consulta `public.tv_channels` (la estructura documentada incluye `id`, `name`, `slug`, `logo_url`, `stream_url`, `stream_type`, `category`, `country_code` e `is_active`) con `SELECT *`, hasta 1000 filas y páginas de 100 canales. Usa `id` como identificador estable, muestra `name`, `logo_url`, `category` y `country_code`, y omite filas donde `is_active` es falso. `stream_type=hls`, `dash` y `custom` devuelven `stream_url` como stream directo; `embed` se ofrece como enlace externo. Se admiten búsqueda, filtro por categoría y `skip`. No se incluye guía EPG: la tabla solo aporta canales y enlaces. Con `SUPABASE_ANON_KEY`, configura una política RLS `SELECT` en `tv_channels` (además de la política existente para `torrents`).
+El catálogo consulta `public.tv_channels` (la estructura documentada incluye `id`, `name`, `slug`, `logo_url`, `stream_url`, `stream_type`, `category`, `country_code` e `is_active`) con `SELECT *`, hasta 1000 filas y páginas de 100 canales. Usa `id` como identificador estable, muestra `name`, `logo_url`, la categoría y el país ya normalizados, y omite filas donde `is_active` es falso. `stream_type=hls`, `dash` y `custom` devuelven `stream_url` como stream directo; `embed` se ofrece como enlace externo. Se admiten búsqueda, filtro por tipo de contenido o país y `skip`. No se incluye guía EPG: la tabla solo aporta canales y enlaces. Con `SUPABASE_ANON_KEY`, configura una política RLS `SELECT` en `tv_channels` (además de la política existente para `torrents`).
+
+### Clasificación del catálogo de TV
+
+La clasificación no exige cambiar la base: se deduce de las columnas que ya existen y se publica en el manifiesto para que Stremio muestre los desplegables.
+
+- **Tipos de contenido** (`TV_CONTENT_TYPES` en `addon.js`): cada tipo reúne alias en español e inglés que se comparan por **palabra completa** sobre el valor sin tildes ni mayúsculas, y gana el alias más largo (`Home Shopping` → Compras, no Estilo de vida; `deportistas` no es `deportes`). Se revisan las categorías declaradas en orden y decide la primera reconocible; si ninguna lo es, se conserva la primera tal cual, y sin categorías el canal queda en «General». Añadir un alias es una línea en esa tabla.
+- **Países** (`tv-countries.js`): `country_code` o `country` se resuelven desde `ES`, `ESP`, `es`, «España» o «Nicaragua» (también `EEUU`, `UK`, `Holanda` como alias) al mismo país, y se muestran con el nombre oficial en español. Lo que no es un país (por ejemplo «Europa» o «Región andina») se respeta literalmente. La tabla es estática: 250 países, sin dependencias ni peticiones externas.
+- **Filtros del manifiesto** (`tvCatalogOptions`): antes de servir `/manifest.json` se agregan los tipos y países presentes en la tabla y se cachean diez minutos (una hora de ventana obsoleta ante fallos) para publicar solo opciones que devuelven resultados. El catálogo por tipo de contenido ordena los tipos por número de canales; el de país, alfabéticamente. `tvCatalogDefinitions` limita a 80 opciones por catálogo y recurre a listas de respaldo si no hay datos.
+- **Coste:** la consulta de descubrimiento no bloquea el manifiesto más de 2,5 segundos y, cuando ya hay una lista cacheada, se refresca en segundo plano. El manifiesto sigue anunciando cinco minutos de caché de edge, así que cada instancia consulta como mucho una vez por ventana.
+- **Detalles de la ficha:** los `genres` que ve el usuario en Stremio son el tipo de contenido y el país normalizados; `country` pasa a mostrarse con su nombre en español.
 
 Campos utilizados: `info_hash` (alternativas `infoHash`, `hash`) o `magnet_url` (`magnetUrl`, `magnet`), título, idioma/audio, resolución/calidad y tamaño (`size_bytes`, `size_gb` o `size` con unidades en inglés, decimales con coma o punto, hasta TB). Opcionalmente `file_idx`/`fileIdx` indica el archivo del torrent y `leechers` afina el orden dentro de un mismo tramo. Los campos de metadatos ausentes se muestran como no indicados, sin inventar idioma, subtítulos ni calidad.
 
@@ -159,7 +178,8 @@ Los magnets admiten BTIH hexadecimal o base32; las filas sin hash válido se des
 
 ## Estructura
 
-- `addon.js`: manifiesto, catálogo/metadatos de TV, consulta y formato de streams.
+- `addon.js`: manifiesto, clasificación y catálogo/metadatos de TV, consulta y formato de streams.
+- `tv-countries.js`: tabla estática ISO 3166-1 (alpha-2, alpha-3 y nombre en español) del catálogo de TV.
 - `worker.js`: rutas sobre la API Fetch (manifiesto, catálogo, metadatos, streams, salud y estáticos), CORS y caché del edge con la Cache API.
 - `worker.mjs`: punto de entrada ESM que expone el manejador a Wrangler.
 - `server.js`: adaptador local del mismo manejador al servidor HTTP de Node.

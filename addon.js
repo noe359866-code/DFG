@@ -10,14 +10,35 @@
 // en Workers. El enrutado vive en worker.js y la interfaz se construye abajo.
 const addonBuilder = require('stremio-addon-sdk/src/builder');
 const { createClient } = require('@supabase/supabase-js');
+const { COUNTRY_NAMES, COUNTRY_ALPHA3 } = require('./tv-countries');
 
 const TV_CHANNEL_CATALOG_ID = 'tv_channels';
+const TV_CHANNEL_COUNTRY_CATALOG_ID = 'tv_channels_country';
+const TV_CHANNEL_COUNTRY_CATALOG_NAME = 'Canales por país';
+const TV_CHANNEL_CATALOG_IDS = [TV_CHANNEL_CATALOG_ID, TV_CHANNEL_COUNTRY_CATALOG_ID];
 const TV_CHANNEL_TABLE = 'tv_channels';
 const TV_CHANNEL_ID_PREFIX = 'nexo-tv:';
 const TV_CHANNEL_QUERY_LIMIT = 1000;
 const TV_CHANNEL_PAGE_SIZE = 100;
 const TV_CHANNEL_CACHE_SECONDS = 120;
 const TV_CHANNEL_FALLBACK_POSTER = 'https://nexo-player-app.noe359866.workers.dev/assets/brand.png';
+// Filtros que se publican en el manifiesto: el catálogo se lee de la base, así
+// que la lista se descubre ahí y solo se recurre a estos valores por defecto
+// cuando no hay datos (Preview sin secretos, Supabase caído...).
+const TV_GENRE_OPTION_LIMIT = 80;
+const TV_OPTIONS_TTL_MS = 10 * 60 * 1000;
+const TV_OPTIONS_STALE_MS = 60 * 60 * 1000;
+const TV_OPTIONS_WAIT_MS = 2500;
+const TV_DEFAULT_CONTENT_TYPE = 'General';
+const TV_FALLBACK_CONTENT_TYPES = [
+  'Noticias', 'Deportes', 'Películas', 'Series', 'Infantil', 'Documentales',
+  'Música', 'Entretenimiento', 'Cultura', TV_DEFAULT_CONTENT_TYPE
+];
+const TV_FALLBACK_COUNTRIES = [
+  'España', 'México', 'Argentina', 'Colombia', 'Chile', 'Perú', 'Venezuela', 'Estados Unidos',
+  'Ecuador', 'Uruguay', 'Paraguay', 'Bolivia', 'Costa Rica', 'Panamá', 'República Dominicana',
+  'Guatemala', 'Honduras', 'El Salvador', 'Nicaragua', 'Cuba', 'Puerto Rico'
+];
 
 // ---------------------------------------------------------------------------
 // 1. MANIFEST - Especificación oficial Stremio
@@ -26,19 +47,16 @@ const manifest = {
   id: 'org.comunidad.torrents.espanol',
   version: require('./package.json').version,
   name: 'Nexo Play',
-  description: 'Películas, series y anime en español e inglés, además de un catálogo de canales de TV en vivo. Grupo de soporte: https://discord.com/invite/qEcdvvcA4',
+  description: 'Películas, series y anime en español e inglés, además de canales de TV en vivo filtrables por tipo de contenido y por país. Grupo de soporte: https://discord.com/invite/qEcdvvcA4',
   resources: [
     'catalog',
     { name: 'meta', types: ['tv'], idPrefixes: [TV_CHANNEL_ID_PREFIX] },
     { name: 'stream', types: ['movie', 'series', 'anime', 'tv'], idPrefixes: ['tt', TV_CHANNEL_ID_PREFIX] }
   ],
   types: ['movie', 'series', 'anime', 'tv'],
-  catalogs: [{
-    type: 'tv',
-    id: TV_CHANNEL_CATALOG_ID,
-    name: 'Canales de TV',
-    extra: [{ name: 'search' }, { name: 'genre' }, { name: 'skip' }]
-  }],
+  // El Worker reemplaza las listas de filtros por las que descubre en la
+  // tabla; aquí quedan las de respaldo para consumidores del SDK y pruebas.
+  catalogs: tvCatalogDefinitions(null),
   behaviorHints: {
     configurable: false,
     configurationRequired: false
@@ -614,6 +632,148 @@ function isChannelEnabled(row) {
     .includes(String(value).trim().toLowerCase());
 }
 
+// ---------------------------------------------------------------------------
+// Clasificación del catálogo de TV: tipo de contenido y país. La tabla
+// compartida declara categoría y país como texto libre, así que aquí se
+// normalizan sin pedir cambios en la base de datos.
+// ---------------------------------------------------------------------------
+
+// Tipos de contenido: reúnen los alias en español e inglés que aparecen en las
+// listas de IPTV. Coinciden por palabra completa y gana el alias más largo, así
+// que «Sports HD» es Deportes, «Talk Show» es Entretenimiento y «deportistas»
+// no se confunde con «deportes». Lo que no se reconoce se respeta tal cual y lo
+// que llega vacío cae en «General».
+const TV_CONTENT_TYPES = [
+  { name: 'Noticias', aliases: ['noticias', 'noticia', 'noticiero', 'noticieros', 'news', 'informativo', 'informativos', 'actualidad', 'prensa'] },
+  { name: 'Deportes', aliases: ['deportes', 'deporte', 'deportivo', 'deportiva', 'sports', 'sport', 'futbol', 'football', 'soccer', 'baloncesto', 'basketball', 'beisbol', 'baseball', 'tenis', 'tennis', 'boxeo', 'boxing', 'ufc', 'mma', 'motorsport', 'motor', 'formula 1', 'esports', 'ciclismo', 'golf'] },
+  { name: 'Películas', aliases: ['peliculas', 'pelicula', 'movies', 'movie', 'cine', 'film', 'films', 'cinema', 'estrenos'] },
+  { name: 'Series', aliases: ['series', 'serie', 'shows', 'show', 'tv shows', 'tvshow', 'ficcion', 'telenovelas', 'telenovela', 'novelas', 'novela'] },
+  { name: 'Infantil', aliases: ['infantil', 'ninos', 'ninas', 'kids', 'kid', 'cartoon', 'cartoons', 'dibujos', 'dibujos animados', 'animacion', 'animation', 'juvenil'] },
+  { name: 'Documentales', aliases: ['documental', 'documentales', 'documentary', 'documentaries', 'docs', 'naturaleza', 'nature', 'historia', 'history'] },
+  { name: 'Música', aliases: ['musica', 'music', 'musical', 'musicales', 'conciertos', 'videoclips', 'mtv'] },
+  { name: 'Cultura', aliases: ['cultura', 'culture', 'arte', 'artes', 'teatro'] },
+  { name: 'Entretenimiento', aliases: ['entretenimiento', 'entertainment', 'variedades', 'variety', 'reality', 'realities', 'concursos', 'concurso', 'humor', 'comedia', 'comedy', 'talk show', 'magazine', 'corazon', 'cotilleo', 'celebridades'] },
+  { name: 'Estilo de vida', aliases: ['estilo de vida', 'lifestyle', 'cocina', 'gastronomia', 'food', 'hogar', 'home', 'salud', 'health', 'bienestar', 'moda', 'fashion', 'belleza', 'decoracion'] },
+  { name: 'Viajes', aliases: ['viajes', 'viaje', 'travel', 'turismo', 'tourism', 'outdoor'] },
+  { name: 'Tecnología', aliases: ['tecnologia', 'tech', 'ciencia', 'ciencias', 'science', 'informatica', 'gadgets'] },
+  { name: 'Religión', aliases: ['religion', 'religioso', 'religiosa', 'fe', 'cristiano', 'cristiana', 'catolico', 'catolica', 'iglesia', 'evangelica', 'espiritual'] },
+  { name: 'Compras', aliases: ['compras', 'shopping', 'teletienda', 'teleshopping', 'ventas'] },
+  { name: TV_DEFAULT_CONTENT_TYPE, aliases: ['general', 'generalista', 'misc', 'varios', 'otros', 'other', 'others', 'local', 'locales', 'regional', 'regionales', 'nacional', 'nacionales', 'autonomicas', 'autonomicos', 'comunitaria', 'publica', 'publicas', 'sin categoria', 'sin clasificar', 'uncategorized', 'unknown', 'desconocido', 'desconocida'] }
+];
+
+// Valores que solo describen la emisión y no el contenido («HD», «FHD 1080p»):
+// no sirven como tipo y se ignoran al clasificar.
+const TV_TECHNICAL_CATEGORY_WORDS = new Set([
+  'hd', 'fhd', 'uhd', 'sd', 'hq', '4k', '8k', '2k', '1080p', '1080i', '720p', '576p', '480p', '360p',
+  'full', 'fullhd', 'live', 'directo', 'en', 'alta', 'definicion', 'ultra', 'tv', 'canal'
+]);
+
+function isTechnicalTVValue(folded) {
+  const words = folded.split(/[^a-z0-9]+/).filter(Boolean);
+  return words.length > 0 && words.every(word => TV_TECHNICAL_CATEGORY_WORDS.has(word));
+}
+const TV_CONTENT_TYPE_INDEX = TV_CONTENT_TYPES.map(type => ({
+  name: type.name,
+  aliases: [...new Set(type.aliases.map(foldChannelSearch).filter(Boolean))].sort((a, b) => b.length - a.length)
+}));
+
+// Nombres de país que la tabla puede escribir a mano; se suman los alias que no
+// coinciden con los nombres oficiales en español.
+const TV_COUNTRY_NAME_ALIASES = {
+  'estados unidos de america': 'US', 'ee uu': 'US', 'eeuu': 'US', usa: 'US', 'united states': 'US',
+  'reino unido de gran bretana e irlanda del norte': 'GB', uk: 'GB', 'great britain': 'GB',
+  holanda: 'NL', 'paises bajos holanda': 'NL', 'republica checa': 'CZ', chequia: 'CZ',
+  birmania: 'MM', suazilandia: 'SZ', 'corea del sur': 'KR', 'corea del norte': 'KP',
+  'republica de corea': 'KR', 'republica popular democratica de corea': 'KP',
+  'republica arabe siria': 'SY', 'republica islamica de iran': 'IR', 'santa sede': 'VA',
+  vaticano: 'VA', 'republica democratica del congo': 'CD', 'republica del congo': 'CG',
+  'costa de marfil': 'CI', 'timor oriental': 'TL', 'sahara occidental': 'EH'
+};
+const TV_COUNTRY_NAME_INDEX = (() => {
+  const index = new Map();
+  for (const [code, name] of Object.entries(COUNTRY_NAMES)) index.set(foldChannelSearch(name), code);
+  for (const [name, code] of Object.entries(TV_COUNTRY_NAME_ALIASES)) index.set(foldChannelSearch(name), code);
+  return index;
+})();
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Palabra completa: «sports hd» contiene «sports», pero «deportistas» no es «deportes».
+function channelWordMatch(foldedText, foldedWord) {
+  if (!foldedText || !foldedWord) return false;
+  return new RegExp(`(^|[^a-z0-9])${escapeRegExp(foldedWord)}([^a-z0-9]|$)`).test(foldedText);
+}
+
+function canonicalTVContentType(value) {
+  const folded = foldChannelSearch(value);
+  if (!folded) return '';
+  const exact = TV_CONTENT_TYPE_INDEX.find(type => type.aliases.includes(folded));
+  if (exact) return exact.name;
+  let best = null;
+  for (const type of TV_CONTENT_TYPE_INDEX) {
+    for (const alias of type.aliases) {
+      if (best && alias.length <= best.length) continue;
+      if (channelWordMatch(folded, alias)) best = { name: type.name, length: alias.length };
+    }
+  }
+  return best ? best.name : '';
+}
+
+// Categorías declaradas en orden: la primera que se reconoce decide el tipo y,
+// si ninguna lo hace, se conserva la primera con contenido para no perder
+// información. Las etiquetas técnicas («HD», «1080p») no cuentan como tipo.
+function channelContentType(genres) {
+  const declared = Array.isArray(genres) ? genres : [];
+  let fallback = '';
+  for (const value of declared) {
+    const folded = foldChannelSearch(value);
+    if (!folded || isTechnicalTVValue(folded)) continue;
+    const canonical = canonicalTVContentType(value);
+    if (canonical) return canonical;
+    if (!fallback) fallback = value;
+  }
+  return fallback || TV_DEFAULT_CONTENT_TYPE;
+}
+
+function countryCodeFromValue(value) {
+  const folded = foldChannelSearch(value);
+  if (!folded) return '';
+  if (/^[a-z]{2}$/.test(folded)) {
+    const code = folded.toUpperCase();
+    if (COUNTRY_NAMES[code]) return code;
+  }
+  if (/^[a-z]{3}$/.test(folded)) {
+    const code = COUNTRY_ALPHA3[folded.toUpperCase()];
+    if (code) return code;
+  }
+  return TV_COUNTRY_NAME_INDEX.get(folded) || '';
+}
+
+// El país se muestra con su nombre en español; si la tabla trae un valor que no
+// se reconoce (por ejemplo una región o «Europa») se respeta literalmente.
+function countryNameFromValue(value) {
+  const raw = channelText(value, 80);
+  if (!raw) return '';
+  const code = countryCodeFromValue(raw);
+  return code ? (COUNTRY_NAMES[code] || code) : raw;
+}
+
+function channelMatchesTVGenre(channel, genre) {
+  const folded = foldChannelSearch(genre);
+  // Sin filtro (o con el «todos» que algunos clientes envían) no se recorta nada.
+  if (!folded || ['todos', 'todas', 'all', 'any'].includes(folded)) return true;
+  if (foldChannelSearch(channel.contentType) === folded) return true;
+  const canonical = canonicalTVContentType(genre);
+  if (canonical && canonical === channel.contentType) return true;
+  if (channel.genres.some(value => foldChannelSearch(value) === folded)) return true;
+  if (foldChannelSearch(channel.country) === folded) return true;
+  const code = countryCodeFromValue(genre);
+  if (code) return channel.countryCode === code;
+  return false;
+}
+
 function encodeBase64Url(value) {
   let binary = '';
   for (const byte of new TextEncoder().encode(value)) binary += String.fromCharCode(byte);
@@ -640,7 +800,8 @@ function normalizeTVChannel(row) {
   ]));
   const genres = channelTextList(channelRowValue(row, ['genres', 'category', 'category_name', 'group_title', 'group', 'genre', 'tags']));
   const description = channelText(channelRowValue(row, ['description', 'about', 'summary', 'info']), 300);
-  const country = channelText(channelRowValue(row, ['country', 'country_name', 'country_code']), 80).toUpperCase();
+  const countryRaw = channelText(channelRowValue(row, ['country', 'country_name', 'country_code']), 80);
+  const countryCode = countryCodeFromValue(countryRaw);
   const language = channelText(channelRowValue(row, ['language', 'lang', 'audio_language']), 80);
   const declaredStreamType = channelText(row.stream_type, 24).toLowerCase();
   const streamType = ['hls', 'dash', 'embed', 'custom'].includes(declaredStreamType) ? declaredStreamType : 'hls';
@@ -654,8 +815,10 @@ function normalizeTVChannel(row) {
     streamType,
     poster,
     genres,
+    contentType: channelContentType(genres),
     description,
-    country,
+    country: countryNameFromValue(countryRaw),
+    countryCode,
     language,
     sortOrder: sortOrder !== null && sortOrder >= 0 ? sortOrder : null
   };
@@ -678,6 +841,9 @@ function channelPosterFallback(origin) {
 
 function buildTVChannelMeta(channel, origin) {
   if (!channel) return null;
+  // Los géneros que ve el usuario son el tipo de contenido y el país ya
+  // normalizados: es la misma clasificación que ofrecen los filtros.
+  const genres = [...new Set([channel.contentType, channel.country].filter(Boolean))];
   return {
     id: channel.id,
     type: 'tv',
@@ -685,7 +851,7 @@ function buildTVChannelMeta(channel, origin) {
     poster: channel.poster || channelPosterFallback(origin),
     posterShape: 'square',
     ...(channel.description ? { description: channel.description } : {}),
-    ...(channel.genres.length ? { genres: channel.genres } : {}),
+    ...(genres.length ? { genres } : {}),
     ...(channel.country ? { country: channel.country } : {}),
     ...(channel.language ? { language: channel.language } : {}),
     behaviorHints: { isLive: true }
@@ -717,21 +883,113 @@ function tvChannelsFromRows(rows) {
   return rows.map(normalizeTVChannel).filter(Boolean).sort(compareTVChannels);
 }
 
+// Descubre los filtros que existen de verdad en la tabla: los tipos de
+// contenido más frecuentes primero y los países por orden alfabético español.
+function tvGenreOptions(channels) {
+  const contentCounts = new Map();
+  const countryCounts = new Map();
+  for (const channel of channels) {
+    if (channel.contentType) contentCounts.set(channel.contentType, (contentCounts.get(channel.contentType) || 0) + 1);
+    if (channel.country) countryCounts.set(channel.country, (countryCounts.get(channel.country) || 0) + 1);
+  }
+  const contentTypes = [...contentCounts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'es'))
+    .slice(0, TV_GENRE_OPTION_LIMIT)
+    .map(([name]) => name);
+  const countries = [...countryCounts.keys()]
+    .sort((a, b) => a.localeCompare(b, 'es'))
+    .slice(0, TV_GENRE_OPTION_LIMIT);
+  return { contentTypes, countries };
+}
+
+// Caché en memoria de los filtros descubiertos. El manifiesto se sirve desde
+// la caché del edge, así que esta consulta no ocurre en cada petición; si la
+// base falla se conserva la última lista buena dentro de la ventana obsoleta.
+let tvGenreOptionsCache = { at: 0, value: null };
+
+function resetTVGenreOptionsCache() {
+  tvGenreOptionsCache = { at: 0, value: null };
+}
+
+async function discoverTVGenreOptions(clientFactory, now) {
+  try {
+    const result = await fetchTVChannelRows(clientFactory);
+    if (!result.error) {
+      const discovered = tvGenreOptions(tvChannelsFromRows(result.rows));
+      if (discovered.contentTypes.length || discovered.countries.length) {
+        tvGenreOptionsCache = { at: now, value: discovered };
+        return discovered;
+      }
+    }
+  } catch (error) {
+    console.error('[TV] Error descubriendo los filtros:', error && (error.message || error.name) || 'desconocido');
+  }
+  return null;
+}
+
+/**
+ * Devuelve los filtros descubiertos sin bloquear el manifiesto: si la lista
+ * cacheada está fresca se usa tal cual; si está obsoleta se sirve de inmediato
+ * mientras se refresca en segundo plano, y solo la primera consulta (sin nada
+ * cacheado) espera un presupuesto corto antes de responder con el respaldo.
+ */
+async function tvCatalogOptions(clientFactory = getSupabaseClient, { now = Date.now(), force = false, budgetMs = TV_OPTIONS_WAIT_MS } = {}) {
+  const cached = force ? { at: 0, value: null } : tvGenreOptionsCache;
+  if (cached.value && now - cached.at < TV_OPTIONS_TTL_MS) return cached.value;
+  const pending = discoverTVGenreOptions(clientFactory, now);
+  if (cached.value && now - cached.at < TV_OPTIONS_STALE_MS) {
+    discardInBackground(pending);
+    return cached.value;
+  }
+  if (!(budgetMs > 0)) {
+    discardInBackground(pending);
+    return null;
+  }
+  return (await Promise.race([pending, sleep(budgetMs).then(() => null)])) || null;
+}
+
+// Catálogos que se publican en el manifiesto: uno por tipo de contenido y otro
+// por país, cada uno con su listado de filtros. Sin datos descubiertos se usan
+// las listas de respaldo para que Stremio siempre muestre un filtro utilizable.
+function tvCatalogDefinitions(options) {
+  const contentTypes = options && Array.isArray(options.contentTypes) && options.contentTypes.length
+    ? options.contentTypes : TV_FALLBACK_CONTENT_TYPES;
+  const countries = options && Array.isArray(options.countries) && options.countries.length
+    ? options.countries : TV_FALLBACK_COUNTRIES;
+  return [
+    {
+      type: 'tv',
+      id: TV_CHANNEL_CATALOG_ID,
+      name: 'Canales de TV',
+      genres: contentTypes,
+      extra: [{ name: 'genre', options: contentTypes }, { name: 'search' }, { name: 'skip' }]
+    },
+    {
+      type: 'tv',
+      id: TV_CHANNEL_COUNTRY_CATALOG_ID,
+      name: TV_CHANNEL_COUNTRY_CATALOG_NAME,
+      genres: countries,
+      extra: [{ name: 'genre', options: countries }, { name: 'search' }, { name: 'skip' }]
+    }
+  ];
+}
+
 async function tvCatalogHandler({ type, id, extra = {}, origin } = {}, clientFactory = getSupabaseClient) {
-  if (type !== 'tv' || id !== TV_CHANNEL_CATALOG_ID) return { metas: [] };
+  if (type !== 'tv' || !TV_CHANNEL_CATALOG_IDS.includes(id)) return { metas: [] };
   try {
     const result = await fetchTVChannelRows(clientFactory);
     if (result.error) return { metas: [] };
 
     const search = foldChannelSearch(extra.search || '');
-    const genre = foldChannelSearch(extra.genre || '');
+    const genre = extra.genre || '';
     let channels = tvChannelsFromRows(result.rows);
     if (search) {
       channels = channels.filter(channel => [
-        channel.name, channel.description, channel.country, channel.language, ...channel.genres
+        channel.name, channel.description, channel.country, channel.countryCode,
+        channel.contentType, channel.language, ...channel.genres
       ].some(value => foldChannelSearch(value).includes(search)));
     }
-    if (genre) channels = channels.filter(channel => channel.genres.some(value => foldChannelSearch(value) === genre));
+    if (genre) channels = channels.filter(channel => channelMatchesTVGenre(channel, genre));
 
     const rawSkip = Number(extra.skip || 0);
     const skip = Number.isSafeInteger(rawSkip) && rawSkip > 0 ? Math.min(rawSkip, TV_CHANNEL_QUERY_LIMIT) : 0;
@@ -1343,4 +1601,4 @@ function buildStream(row, infoHash, magnetTrackers = [], imdbId = '') {
 const addonInterface = builder.getInterface();
 module.exports = addonInterface;
 
-module.exports.helpers = { numericNonNegative, debugEnabled, metadataScore, parseStremioId, getLanguageTag, getResolutionTag, detectLanguageTag, formatSizeGB, parseSizeBytes, extractInfoHashFromMagnet, extractTrackersFromMagnet, extractTitleFromMagnet, sanitizeOneLine, buildStreamEntry, compareStreamEntries, streamHandler, createCachedStreamHandler, cachedStreamHandler, streamResourceHandler, tvChannelId, normalizeTVChannel, buildTVChannelMeta, tvCatalogHandler, tvMetaHandler, tvStreamHandler, getSupabaseClient, configure, configStatus, normalizeSupabaseUrl, cleanEnvValue, torrentColumns };
+module.exports.helpers = { numericNonNegative, debugEnabled, metadataScore, parseStremioId, getLanguageTag, getResolutionTag, detectLanguageTag, formatSizeGB, parseSizeBytes, extractInfoHashFromMagnet, extractTrackersFromMagnet, extractTitleFromMagnet, sanitizeOneLine, buildStreamEntry, compareStreamEntries, streamHandler, createCachedStreamHandler, cachedStreamHandler, streamResourceHandler, tvChannelId, normalizeTVChannel, buildTVChannelMeta, canonicalTVContentType, channelContentType, countryCodeFromValue, countryNameFromValue, channelMatchesTVGenre, tvGenreOptions, tvCatalogOptions, tvCatalogDefinitions, resetTVGenreOptionsCache, tvCatalogHandler, tvMetaHandler, tvStreamHandler, getSupabaseClient, configure, configStatus, normalizeSupabaseUrl, cleanEnvValue, torrentColumns };

@@ -1,5 +1,17 @@
 # Historial de cambios
 
+## 1.7.0 — 2026-10-04
+
+**El catálogo de TV se ordena solo por tipo de contenido y por país:** los canales de `tv_channels` se clasifican a partir de la categoría y el país que ya declaran, y Stremio publica dos catálogos con sus desplegables de filtros.
+
+- **Clasificación por tipo de contenido:** la categoría declarada (`category`, `genres`, `group_title`…) se agrupa en Noticias, Deportes, Películas, Series, Infantil, Documentales, Música, Cultura, Entretenimiento, Estilo de vida, Viajes, Tecnología, Religión, Compras y General, reconociendo alias en español e inglés por palabra completa y con prioridad para el alias más largo («Sports HD» → Deportes, «TV Shows» → Series, «Home Shopping» → Compras). Las categorías desconocidas se conservan tal cual y las vacías caen en «General»; no se modifica la base de datos.
+- **Catálogo «Canales por país»:** nuevo catálogo `tv_channels_country` con el país como filtro. El país se resuelve desde `ES`, `ESP`, `es`, «España» o «Nicaragua» (con alias como `EEUU`, `UK` u `Holanda`) y se muestra con su nombre en español; `tv-countries.js` aporta la tabla ISO 3166-1 completa (250 países) sin dependencias ni peticiones externas.
+- **Filtros descubiertos en la tabla:** el manifiesto publica solo los tipos y países que existen de verdad (hasta 80 por catálogo, tipos por número de canales y países en orden alfabético español), con listas de respaldo si la base no responde o el despliegue no tiene secretos. La consulta de descubrimiento se cachea diez minutos, con una hora de ventana obsoleta, se refresca en segundo plano y nunca bloquea el manifiesto más de 2,5 segundos.
+- **Fichas y filtros coherentes:** `genres` en los metadatos pasa a ser el tipo de contenido y el país normalizados; `country` se muestra con su nombre en español; el filtro acepta el valor normalizado o el original de la tabla y sigue combinándose con `search` y `skip`.
+- **Manifiesto:** un catálogo por dimensión («Canales de TV» y «Canales por país»), ambos con `genre` (con `options`), `search` y `skip`. Stremio guarda el manifiesto en caché, así que puede hacer falta quitar y volver a añadir el complemento para ver los catálogos nuevos.
+- **Pruebas:** la clasificación de tipos y países, la agregación y caché de filtros, el catálogo por país y los filtros publicados en el manifiesto del Worker.
+- **Versión sincronizada:** `package.json`, `package-lock.json`, manifiesto y página pública quedan en `1.7.0`.
+
 ## 1.6.2 — 2026-10-04
 
 **Canales de TV en vivo desde Supabase:** el addon ahora publica un catálogo de televisión propio en Stremio, además de las fuentes existentes de películas, series y anime.
