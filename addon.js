@@ -285,6 +285,23 @@ function toFiniteNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+// Contadores de pares: algunas bases guardan «1.2k» o «3,5 mil» en seeders.
+// Además de los números planos se aceptan los sufijos k/m (mil y millón).
+const COUNT_PATTERN = /^(\d+(?:[.,]\d+)?)\s*(k|m|mil|millon|millón)?$/i;
+const COUNT_MULTIPLIERS = { k: 1e3, mil: 1e3, m: 1e6, millon: 1e6, 'millón': 1e6 };
+
+function parseCount(value) {
+  const number = toFiniteNumber(value);
+  if (number !== null) return number;
+  if (typeof value !== 'string') return null;
+  const match = COUNT_PATTERN.exec(value.trim());
+  if (!match) return null;
+  const base = Number(match[1].replace(',', '.'));
+  if (!Number.isFinite(base)) return null;
+  const suffix = (match[2] || '').toLowerCase();
+  return Math.round(base * (COUNT_MULTIPLIERS[suffix] || 1));
+}
+
 // Distingue "no hay tamaño" de "hay tamaño y es cero": el texto muestra 0.00
 // GB cuando la fila lo declara, y — cuando la columna está vacía o es basura.
 function resolveSize(row) {
@@ -332,10 +349,26 @@ function isUsableTracker(value) {
   } catch (_) { return false; }
 }
 
+// La columna trackers convive en tres formatos: array de Supabase, texto
+// separado por comas/saltos y JSON serializado («["udp://..."]»). Los tres se
+// aceptan; cualquier valor que no sea una URL utilizable se descarta igual.
+function parseTrackerList(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string') return [];
+  const text = value.trim();
+  if (!text) return [];
+  if (text.startsWith('[') && text.endsWith(']')) {
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) return parsed;
+    } catch (_) { /* no era JSON: se trata como lista de texto */ }
+    return text.slice(1, -1).split(/[,;\s]+/).filter(Boolean);
+  }
+  return text.split(/[,;\n\r\t]+|\s{2,}/).map(item => item.trim()).filter(Boolean);
+}
+
 function buildTrackers(dbTrackersRaw, magnetTrackers = []) {
-  const dbTrackers = Array.isArray(dbTrackersRaw) ? dbTrackersRaw
-    : (typeof dbTrackersRaw === 'string' && dbTrackersRaw.trim() ? [dbTrackersRaw] : []);
-  const custom = [...magnetTrackers, ...dbTrackers]
+  const custom = [...magnetTrackers, ...parseTrackerList(dbTrackersRaw)]
     .map(tr => typeof tr === 'string' ? tr.trim() : '')
     .filter(isUsableTracker);
   const candidateList = custom.length ? custom : DEFAULT_TRACKERS;
@@ -422,7 +455,9 @@ function detectLanguageTag(text) {
     has(/\b(eng|english|inglés|ingles)\b/);
 
   if (has(/\b(dual|multi|dual-sub)\b/) || (spanish && english)) return 'DUAL';
-  if (has(/\b(vose|vos|subtitulado)\b/)) return 'VOSE';
+  // «VO»/«V.O.» es la versión original (habitualmente subtitulada), así que se
+  // agrupa con VOSE en lugar de quedar como idioma indeterminado.
+  if (has(/\b(vose|vos|vo|v\.\s?o\.?|subtitulado|subtitulada)\b/)) return 'VOSE';
   if (has(/\b(vost|vostfr|vosto|vosteng)\b/)) return 'VOST';
   if (has(/\b(sub|subt|subsample)\b/)) return 'SUB';
   if (has(/\b(castellano|cast)\b/)) return 'CAST';
@@ -537,6 +572,18 @@ function getResolutionTag(row) {
 // 5xx puntuales): vale la pena un segundo intento antes de rendirse.
 const TRANSIENT_ERROR = /network|fetch|timed?\s*out|timeout|econn|socket|abort|gateway|temporar|502|503|504/i;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// Anime y series comparten estructura de episodios: hay bases que etiquetan
+// como «series» títulos de anime y al revés. En el cotejo de último recurso se
+// aceptan las dos etiquetas entre sí; una película nunca se cuela por aquí.
+function sameContentFamily(rowType, requestedType) {
+  const left = String(rowType || '').toLowerCase();
+  const right = String(requestedType || '').toLowerCase();
+  if (!left || !right) return false;
+  if (left === right) return true;
+  const episodic = ['series', 'anime'];
+  return episodic.includes(left) && episodic.includes(right);
+}
 
 // Cuántas filas se piden, cuántas se releen para el cotejo en memoria y cuántas
 // se devuelven. El ranking ordena por calidad e idioma, no por seeders, así que
@@ -1086,7 +1133,7 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
       .order('seeders', { ascending: false, nullsFirst: false })
       .limit(limit);
     const baseQuery = () => supabase.from('torrents').select(columns).eq('imdb_id', imdbId).eq('type', type);
-    const mapRows = (rows, packSeason = null) => (Array.isArray(rows) ? rows : [])
+    const mapRows = (rows, packSeason = null, seriesPack = false) => (Array.isArray(rows) ? rows : [])
       .map(row => {
         if (!row || typeof row !== 'object') return null;
         let infoHash = row.info_hash_clean || row.info_hash || row.infoHash || row.hash || null;
@@ -1095,7 +1142,7 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
         if (!isValidInfoHash(infoHash)) infoHash = extractInfoHashFromMagnet(magnet);
         if (!isValidInfoHash(infoHash)) return null;
         return buildStreamEntry(row, infoHash, extractTrackersFromMagnet(magnet), imdbId,
-          extractTitleFromMagnet(magnet), packSeason, season);
+          extractTitleFromMagnet(magnet), packSeason, season, seriesPack);
       })
       .filter(Boolean);
 
@@ -1151,22 +1198,37 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
         }
         const scannedRows = Array.isArray(scanned.data) ? scanned.data : [];
         const typedRows = scannedRows.filter(row => row && typeof row === 'object' &&
-          (!row.type || String(row.type).toLowerCase() === type));
+          (!row.type || sameContentFamily(row.type, type)));
         const sameSeason = typedRows.filter(row => toFiniteNumber(row.season) === season);
         const looseExact = sameSeason.filter(row => toFiniteNumber(row.episode) === episode);
         const absoluteExact = type === 'anime'
           ? typedRows.filter(row => toFiniteNumber(row.absolute_episode) === episode)
           : [];
-        const selectedExact = looseExact.length ? looseExact : absoluteExact;
+        // Hay bases que guardan los episodios sin temporada (numeración
+        // absoluta). En la temporada 1 absoluto y episodio coinciden, así que
+        // solo ahí se acepta ese cotejo, y solo si no hubo uno exacto.
+        const seasonlessExact = looseExact.length || absoluteExact.length || season !== 1 ? []
+          : typedRows.filter(row => toFiniteNumber(row.season) === null && toFiniteNumber(row.episode) === episode);
+        const selectedExact = looseExact.length ? looseExact : absoluteExact.length ? absoluteExact : seasonlessExact;
         const loosePack = selectedExact.length ? [] : sameSeason.filter(row => toFiniteNumber(row.episode) === null);
-        const looseEntries = mapRows(
-          selectedExact.length ? selectedExact : loosePack,
-          selectedExact.length ? null : season
-        );
+        // Sin pack de esa temporada, un pack de la serie completa (season y
+        // episode nulos) sigue siendo mejor que no ofrecer nada: se etiqueta
+        // como «SERIE COMPLETA» para que el usuario sepa qué descarga.
+        const wholeSeriesPack = selectedExact.length || loosePack.length ? []
+          : typedRows.filter(row => toFiniteNumber(row.season) === null && toFiniteNumber(row.episode) === null);
+        const looseEntries = selectedExact.length
+          ? mapRows(selectedExact)
+          : loosePack.length
+            ? mapRows(loosePack, season)
+            : mapRows(wholeSeriesPack, null, true);
         if (looseEntries.length) {
-          data = looseExact.length ? looseExact : loosePack;
+          data = selectedExact.length ? selectedExact : loosePack.length ? loosePack : wholeSeriesPack;
           streamEntries = looseEntries;
-          console.log(`[Stream] Recuperadas ${looseEntries.length} fuentes cotejando en memoria (${looseExact.length ? 'episodio exacto' : 'pack de temporada'})`);
+          const source = looseExact.length ? 'episodio exacto'
+            : absoluteExact.length ? 'episodio absoluto'
+              : seasonlessExact.length ? 'episodio sin temporada'
+                : loosePack.length ? 'pack de temporada' : 'pack de serie completa';
+          console.log(`[Stream] Recuperadas ${looseEntries.length} fuentes cotejando en memoria (${source})`);
         }
       }
     } else {
@@ -1192,13 +1254,19 @@ async function streamHandler({ type, id } = {}, clientFactory = getSupabaseClien
     for (const entry of streamEntries) entry.rankingScore = metadataScore(entry);
     streamEntries.sort(compareStreamEntries);
     const seen = new Set();
-    const uniqueEntries = streamEntries.filter(entry => {
+    const dedupedEntries = streamEntries.filter(entry => {
       const stream = entry.stream;
       const key = `${stream.infoHash}:${stream.fileIdx ?? ''}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     });
+
+    // Una fuente sin seeders puede tardar minutos en fallar: solo se ofrecen
+    // como últimos recursos cuando no hay suficientes fuentes vivas para
+    // llenar la lista. Con 25 opciones con pares, las muertas no aportan.
+    const healthyEntries = dedupedEntries.filter(entry => entry.seeders > 0);
+    const uniqueEntries = healthyEntries.length >= MAX_STREAMS ? healthyEntries : dedupedEntries;
 
     // Selección de streams: se prioriza el mejor candidato en español
     // (ESP/LAT/CAST) y el mejor en inglés como opciones principales. Si no
@@ -1420,12 +1488,19 @@ const QUALITY_WEIGHT = {
 // Los formatos de baja calidad (CAM, TS, HDCAM) se penalizan explícitamente
 // para que cualquier release digital les gane aunque tengan misma resolución.
 const FORMAT_TOKENS = Object.freeze({
-  'web-dl': 7, 'webdl': 7, 'web rip': 6, 'webrip': 6, 'bluray': 6,
-  'brrip': 5, 'hdtv': 4, 'dvdrip': 2, 'remux': 8
+  'web-dl': 7, 'webdl': 7, 'web rip': 6, 'webrip': 6, 'bluray': 6, 'bdrip': 5,
+  'brrip': 5, 'web': 4, 'hdtv': 4, 'hdrip': 3, 'dvdrip': 2, 'remux': 8
 });
+// La calidad baja se busca por palabra completa: «Torrents» no es «TS» ni
+// «Webcam» es «CAM», así que el nombre de un sitio o de un documental no
+// penaliza una fuente buena.
 const LOW_QUALITY_PENALTIES = Object.freeze({
-  'cam': -15, 'hdcam': -12, 'ts': -10, 'telesync': -10, 'tc': -8, 'telecine': -8, 'screener': -3
+  'cam': -15, 'hdcam': -12, 'webcam': -12, 'ts': -10, 'hdts': -9, 'telesync': -10,
+  'tc': -8, 'telecine': -8, 'screener': -4, 'dvdscr': -4, 'r5': -4, 'workprint': -10
 });
+const LOW_QUALITY_PATTERN = new RegExp(
+  `(?<![a-z0-9])(${Object.keys(LOW_QUALITY_PENALTIES).map(escapeRegExp).join('|')})(?![a-z0-9])`, 'g'
+);
 const CODEC_WEIGHT = { av1: 8, hevc: 7, h265: 7, x265: 7, h264: 5, x264: 5, vp9: 4 };
 const HDR_WEIGHT = { 'dolby vision': 8, dolbyvision: 8, 'dv': 7, 'hdr10+': 7, hdr10: 6, hdr: 5, sdr: 0 };
 
@@ -1458,8 +1533,9 @@ function metadataScore(entry) {
     if (formatText.includes(token)) formatScore = Math.max(formatScore, weight);
   }
   let qualityPenalty = 0;
-  for (const [token, penalty] of Object.entries(LOW_QUALITY_PENALTIES)) {
-    if (formatText.includes(token)) qualityPenalty = Math.min(qualityPenalty, penalty);
+  for (const match of formatText.match(LOW_QUALITY_PATTERN) || []) {
+    const penalty = LOW_QUALITY_PENALTIES[match];
+    if (penalty !== undefined) qualityPenalty = Math.min(qualityPenalty, penalty);
   }
   // Bonificación por ediciones especiales (Remux/IMAX/Extended)
   const editionBonus = /\bremux\b/.test(formatText) ? 3 :
@@ -1499,7 +1575,8 @@ function compareStreamEntries(a, b) {
 
 // seasonPack: número de temporada cuando la fila es un pack completo en vez
 // del episodio exacto (se etiqueta para que el usuario sepa qué descarga).
-function buildStreamEntry(row, infoHash, magnetTrackers = [], imdbId = '', magnetTitle = null, seasonPack = null, season = null) {
+// seriesPack: la fila es un pack de la serie entera (season/episode nulos).
+function buildStreamEntry(row, infoHash, magnetTrackers = [], imdbId = '', magnetTitle = null, seasonPack = null, season = null, seriesPack = false) {
   const metadata = { ...row, name: row.name || magnetTitle };
   const combinedText = [row.release_name, row.title, row.name, magnetTitle, row.quality, row.source, row.format]
     .filter(Boolean).join(' ');
@@ -1507,8 +1584,8 @@ function buildStreamEntry(row, infoHash, magnetTrackers = [], imdbId = '', magne
   const resolution = getResolutionTag(metadata);
   const sizeGB = formatSizeGB(row);
   const sizeBytes = parseSizeBytes(row);
-  const seeders = Math.max(0, toFiniteNumber(row.seeders ?? row.seed) ?? 0);
-  const leecherCount = toFiniteNumber(row.leechers);
+  const seeders = Math.max(0, parseCount(row.seeders ?? row.seeds ?? row.seed) ?? 0);
+  const leecherCount = parseCount(row.leechers ?? row.leechs ?? row.peers);
 
   // Detectar etiquetas técnicas desde el nombre completo del release
   const hdrTags = cleanHdrTags(detectTags(combinedText, HDR_TAGS));
@@ -1535,9 +1612,10 @@ function buildStreamEntry(row, infoHash, magnetTrackers = [], imdbId = '', magne
   ].filter(Boolean).join(' · ');
 
   // name: cabecera corta visible en lista
+  const packLabel = seriesPack ? 'SERIE COMPLETA' : seasonPack !== null ? `PACK T${seasonPack}` : '';
   const nameParts = [`[${langTag}] ${resolution}`];
   if (badgeSuffix) nameParts.push(badgeSuffix);
-  if (seasonPack !== null) nameParts.push(`PACK T${seasonPack}`);
+  if (packLabel) nameParts.push(packLabel);
   const name = `Nexo Play\n${nameParts.join(' · ')}`;
 
   // title: multilínea con detalles (Stremio lo muestra al hacer hover)
@@ -1546,7 +1624,8 @@ function buildStreamEntry(row, infoHash, magnetTrackers = [], imdbId = '', magne
     `🎬 ${titleDisplay}`,
     ...(warningTags.length ? [`🚨 Calidad: ${warningTags.join(' · ')}`] : []),
     ...(editionTags.length ? [`🏷️ Edición: ${editionTags.join(' · ')}`] : []),
-    ...(seasonPack !== null ? [`🗂️ Pack de la temporada ${seasonPack} completa (elige el episodio al reproducir)`] : []),
+    ...(seriesPack ? ['🗂️ Pack de la serie completa (elige temporada y episodio al reproducir)']
+      : seasonPack !== null ? [`🗂️ Pack de la temporada ${seasonPack} completa (elige el episodio al reproducir)`] : []),
     `🔊 Audio: ${audio}${audioTags.length ? ` (${audioTags.join('/')})` : ''}`,
     `📝 Subs: ${subs || 'No indicados'}${techBadges ? `  |  ⚡ ${techBadges}` : ''}`,
     `💾 Tamaño: ${sizeGB} GB`,
@@ -1563,16 +1642,20 @@ function buildStreamEntry(row, infoHash, magnetTrackers = [], imdbId = '', magne
   const numericFileIdx = rawFileIdx === '' || rawFileIdx === null || rawFileIdx === undefined ? NaN : Number(rawFileIdx);
   const fileIdx = Number.isSafeInteger(numericFileIdx) && numericFileIdx >= 0 ? numericFileIdx : undefined;
 
+  // Identifica título + temporada + calidad + idioma: la reproducción continua
+  // solo agrupa episodios de la misma temporada y nunca títulos distintos, así
+  // Stremio no encadena un 1080p con un 4K. Los packs llevan su propia marca
+  // para que «siguiente episodio» no salte a un pack de temporada completa.
+  const seasonKey = seriesPack ? 'allpack' : seasonPack !== null ? `s${seasonPack}pack`
+    : season === null ? 'movie' : `s${season}`;
+
   const stream = {
     name,
     title: titleLines.join('\n'),
     infoHash: infoHash.toLowerCase(),
     ...(fileIdx !== undefined ? { fileIdx } : {}),
     behaviorHints: {
-      // Identifica título + temporada + calidad + idioma: la reproducción
-      // continua solo agrupa episodios de la misma temporada y nunca títulos
-      // distintos, así Stremio no encadena un 1080p con un 4K.
-      bingeGroup: `nexo-play|${imdbId}|${season === null ? 'movie' : `s${season}`}|${resolution.toLowerCase()}-${langTag.toLowerCase()}`,
+      bingeGroup: `nexo-play|${imdbId}|${seasonKey}|${resolution.toLowerCase()}-${langTag.toLowerCase()}`,
       ...(sizeBytes ? { videoSize: sizeBytes } : {}),
       ...(rawTitle ? { filename: titleDisplay } : {})
     },
@@ -1601,4 +1684,4 @@ function buildStream(row, infoHash, magnetTrackers = [], imdbId = '') {
 const addonInterface = builder.getInterface();
 module.exports = addonInterface;
 
-module.exports.helpers = { numericNonNegative, debugEnabled, metadataScore, parseStremioId, getLanguageTag, getResolutionTag, detectLanguageTag, formatSizeGB, parseSizeBytes, extractInfoHashFromMagnet, extractTrackersFromMagnet, extractTitleFromMagnet, sanitizeOneLine, buildStreamEntry, compareStreamEntries, streamHandler, createCachedStreamHandler, cachedStreamHandler, streamResourceHandler, tvChannelId, normalizeTVChannel, buildTVChannelMeta, canonicalTVContentType, channelContentType, countryCodeFromValue, countryNameFromValue, channelMatchesTVGenre, tvGenreOptions, tvCatalogOptions, tvCatalogDefinitions, resetTVGenreOptionsCache, tvCatalogHandler, tvMetaHandler, tvStreamHandler, getSupabaseClient, configure, configStatus, normalizeSupabaseUrl, cleanEnvValue, torrentColumns };
+module.exports.helpers = { numericNonNegative, debugEnabled, metadataScore, parseCount, sameContentFamily, parseTrackerList, parseStremioId, getLanguageTag, getResolutionTag, detectLanguageTag, formatSizeGB, parseSizeBytes, extractInfoHashFromMagnet, extractTrackersFromMagnet, extractTitleFromMagnet, sanitizeOneLine, buildStreamEntry, compareStreamEntries, streamHandler, createCachedStreamHandler, cachedStreamHandler, streamResourceHandler, tvChannelId, normalizeTVChannel, buildTVChannelMeta, canonicalTVContentType, channelContentType, countryCodeFromValue, countryNameFromValue, channelMatchesTVGenre, tvGenreOptions, tvCatalogOptions, tvCatalogDefinitions, resetTVGenreOptionsCache, tvCatalogHandler, tvMetaHandler, tvStreamHandler, getSupabaseClient, configure, configStatus, normalizeSupabaseUrl, cleanEnvValue, torrentColumns };

@@ -8,15 +8,15 @@
 <script src="/assets/site.js" defer></script>
 </head>
 <body>
-<header><a class="wordmark" href="/">◈ NEXO PLAY</a><span class="version">STREMIO ADDON <b id="version">1.7.0</b></span></header>
+<header><a class="wordmark" href="/">◈ NEXO PLAY</a><span class="version">STREMIO ADDON <b id="version">1.6.3</b></span></header>
 <main>
 <section class="intro"><div class="eyebrow">DOS IDIOMAS. INFINITAS HISTORIAS.</div><h1>Tu próxima historia,<br><em>más cerca.</em></h1><p>Películas, series y anime en español e inglés, junto con canales de TV en vivo clasificados por tipo de contenido y por país para ver desde Stremio.</p><div class="tags"><span>ES · Español</span><span>EN · English</span><span>Audio dual</span><span>TV en vivo</span></div>
 <div class="actions"><a id="install" class="primary" href="/manifest.json">Añadir a Stremio <span>↗</span></a><button id="copy" type="button">Copiar enlace</button><a href="https://discord.gg/qEcdvvcA4" target="_blank" rel="noopener noreferrer">Soporte en Discord</a></div><p class="feedback" id="feedback" role="status" aria-live="polite"></p>
 <details><summary>¿Cómo se instala?</summary><p>Abre Stremio y pulsa «Añadir a Stremio». También puedes copiar este enlace y pegarlo en la sección Complementos de Stremio.</p><p>Las fuentes de películas y series son torrents (enlaces magnet) con información de idioma y calidad. Los catálogos «Canales de TV» y «Canales por país» ofrecen enlaces directos de TV en vivo configurados por el administrador, con filtro por tipo de contenido (Noticias, Deportes, Películas, Infantil…) y por país.</p><p>¿Problemas para instalar o para encontrar una opción? <a href="https://discord.gg/qEcdvvcA4" target="_blank" rel="noopener noreferrer">Únete al canal de soporte en Discord</a>.</p><label for="url">Enlace del complemento</label><input id="url" readonly aria-label="Enlace del complemento"><a href="/manifest.json">Ver manifiesto →</a></details></section>
 <figure><img src="/assets/brand.png" alt="Símbolo de reproducción Nexo Play en violeta y cian" width="1024" height="1024"><figcaption>DALE PLAY A LO QUE TE CONECTA.</figcaption></figure>
 <section class="finder" aria-labelledby="finder-title">
-<div class="eyebrow" id="release">NOVEDADES · 1.7.0</div><h2 id="finder-title">Busca tus fuentes</h2>
-<p>Los canales de TV se clasifican solos: «Canales de TV» filtra por tipo de contenido (Noticias, Deportes, Películas, Series, Infantil…) y «Canales por país» por país, con los filtros tomados de la propia base de datos, búsqueda por nombre y reproducción directa. Se conserva el buscador de fuentes para películas, series y anime.</p>
+<div class="eyebrow" id="release">NOVEDADES · 1.6.3</div><h2 id="finder-title">Busca tus fuentes</h2>
+<p>Los canales de TV se clasifican solos: «Canales de TV» filtra por tipo de contenido (Noticias, Deportes, Películas, Series, Infantil…) y «Canales por país» por país, con los filtros tomados de la propia base de datos. Las fuentes de películas y series mejoran además su selección: descartan las fuentes muertas cuando hay alternativas vivas, recuperan packs de temporada y de serie completa, entienden seeders como «1.2k» y no confunden el nombre de un sitio con una etiqueta de baja calidad.</p>
 <form id="search-form">
 <label for="search-id">ID o enlace de IMDb</label><input id="search-id" required maxlength="250" placeholder="tt0111161 o https://www.imdb.com/title/tt0111161/">
 <div class="search-grid"><label>Tipo<select id="search-type"><option value="movie">Película</option><option value="series">Serie</option><option value="anime">Anime</option></select></label>

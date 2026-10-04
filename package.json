@@ -1,6 +1,6 @@
 {
   "name": "nexo-play-addon",
-  "version": "1.7.0",
+  "version": "1.6.3",
   "description": "Películas, series, anime y canales de TV en vivo, clasificados por tipo de contenido y país, para Stremio.",
   "main": "addon.js",
   "type": "commonjs",
