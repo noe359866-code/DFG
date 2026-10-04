@@ -8,6 +8,12 @@ test('consistent release and private public description', () => {
   assert.equal(addon.manifest.name, 'Nexo Play');
   assert.ok(addon.manifest.description.includes('Grupo de soporte: https://discord.com/invite/qEcdvvcA4'));
   assert.doesNotMatch(addon.manifest.description, /supabase|public\.torrents|service_role/i);
+  assert.ok(addon.manifest.types.includes('tv'));
+  assert.ok(addon.manifest.resources.some(resource => resource === 'catalog'));
+  assert.deepEqual(addon.manifest.catalogs[0], {
+    type: 'tv', id: 'tv_channels', name: 'Canales de TV',
+    extra: [{ name: 'search' }, { name: 'genre' }, { name: 'skip' }]
+  });
 });
 test('public stremio-addons.net verification in manifest', () => {
   assert.equal(addon.manifest.stremioAddonsConfig.issuer, 'https://stremio-addons.net');
@@ -79,6 +85,67 @@ function mock(data, error = null) {
   query.abortSignal = async signal => { assert.ok(signal instanceof AbortSignal); return { data, error }; };
   return { client: () => query, calls };
 }
+
+test('TV catalog, metadata and live streams read public.tv_channels', async () => {
+  const data = [
+    { id: '00000000-0000-4000-8000-000000000001', name: 'Águila Deportes', slug: 'aguila-deportes', logo_url: null, stream_url: 'https://video.example/live.m3u8', stream_type: 'hls', category: 'Deportes', country_code: 'NIC', is_active: true },
+    { id: '00000000-0000-4000-8000-000000000002', name: 'Canal Noticias', slug: 'canal-noticias', logo_url: 'https://img.example/news.png', stream_url: 'https://video.example/news.mpd', stream_type: 'dash', category: 'Noticias', country_code: 'NIC', is_active: true },
+    { id: '00000000-0000-4000-8000-000000000003', name: 'Canal oculto', stream_url: 'https://video.example/hidden.m3u8', stream_type: 'hls', category: 'Noticias', country_code: 'NIC', is_active: false }
+  ];
+  const m = mock(data);
+  const { tvCatalogHandler, tvMetaHandler, tvStreamHandler } = addon.helpers;
+  const catalog = await tvCatalogHandler({ type: 'tv', id: 'tv_channels', origin: 'https://addon.example' }, m.client);
+  assert.equal(catalog.metas.length, 2, 'oculta registros marcados como inactivos');
+  assert.equal(catalog.metas[0].name, 'Águila Deportes', 'ordena por nombre alfabéticamente');
+  assert.equal(catalog.metas[0].type, 'tv');
+  assert.equal(catalog.metas[0].poster, 'https://addon.example/assets/brand.png', 'usa la marca si no hay logo');
+  assert.equal(catalog.metas[0].country, 'NIC', 'mapea country_code a los metadatos de Stremio');
+  assert.equal(catalog.metas[0].behaviorHints.isLive, true);
+  assert.equal(catalog.metas[1].poster, 'https://img.example/news.png');
+  assert.ok(m.calls.some(call => call[0] === 'from' && call[1] === 'tv_channels'));
+  assert.ok(m.calls.some(call => call[0] === 'select' && call[1] === '*'));
+
+  const filtered = await tvCatalogHandler({
+    type: 'tv', id: 'tv_channels', extra: { search: 'aguila', genre: 'deportes' }
+  }, m.client);
+  assert.deepEqual(filtered.metas.map(meta => meta.name), ['Águila Deportes'], 'search filtra ignorando tildes y mayúsculas');
+
+  const channelId = catalog.metas[0].id;
+  const metadata = await tvMetaHandler({ type: 'tv', id: channelId, origin: 'https://addon.example' }, m.client);
+  assert.equal(metadata.meta.id, channelId);
+  assert.equal(metadata.meta.name, 'Águila Deportes');
+  const playback = await tvStreamHandler({ type: 'tv', id: channelId }, m.client);
+  assert.equal(playback.streams.length, 1);
+  assert.equal(playback.streams[0].url, 'https://video.example/live.m3u8');
+  assert.equal(playback.streams[0].behaviorHints.notWebReady, true, 'marca HLS como no compatible con reproducción web directa');
+  assert.equal(playback.cacheMaxAge, 120);
+  const dash = await tvStreamHandler({ type: 'tv', id: catalog.metas[1].id }, m.client);
+  assert.equal(dash.streams[0].url, 'https://video.example/news.mpd');
+  assert.match(dash.streams[0].name, /DASH/);
+});
+
+test('TV handlers reject unrelated catalog IDs and unsafe stream schemes', async () => {
+  const m = mock([{ id: 'unsafe', name: 'No reproducible', stream_url: 'javascript:alert(1)', is_active: true }]);
+  assert.deepEqual(await addon.helpers.tvCatalogHandler({ type: 'movie', id: 'tv_channels' }, m.client), { metas: [] });
+  assert.deepEqual(await addon.helpers.tvStreamHandler({ type: 'tv', id: 'not-a-channel-id' }, m.client), { streams: [] });
+  const meta = await addon.helpers.tvCatalogHandler({ type: 'tv', id: 'tv_channels' }, m.client);
+  assert.equal(meta.metas.length, 1, 'el canal puede mostrarse aunque su URL no sea reproducible');
+  const stream = await addon.helpers.tvStreamHandler({ type: 'tv', id: meta.metas[0].id }, m.client);
+  assert.deepEqual(stream.streams, []);
+  assert.equal(stream.cacheMaxAge, 60);
+});
+
+test('TV embed channels are exposed as external links', async () => {
+  const m = mock([{
+    id: '00000000-0000-4000-8000-000000000004', name: 'Canal Web', slug: 'canal-web',
+    stream_url: 'https://player.example/channel/4', stream_type: 'embed', category: 'Noticias',
+    country_code: 'NIC', is_active: true
+  }]);
+  const catalog = await addon.helpers.tvCatalogHandler({ type: 'tv', id: 'tv_channels' }, m.client);
+  const result = await addon.helpers.tvStreamHandler({ type: 'tv', id: catalog.metas[0].id }, m.client);
+  assert.equal(result.streams[0].externalUrl, 'https://player.example/channel/4');
+  assert.equal(result.streams[0].url, undefined);
+});
 test('episode filter, hash fallback, dedup and file index', async () => {
   const m = mock([{ info_hash: hash, file_idx: 0, season: 0, episode: 1, audio: 'English' }, { info_hash: hash, file_idx: 0, season: 0, episode: 1 }, { magnet: `magnet:?xt=urn:btih:${hash}`, file_idx: 1, season: 0, episode: 1 }, { magnet: 'magnet:bad', season: 0, episode: 1 }]);
   const result = await streamHandler({ type: 'series', id: 'tt1234567:0:1' }, m.client);

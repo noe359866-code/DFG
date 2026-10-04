@@ -1,6 +1,6 @@
 /**
  * Nexo Play - Cloudflare Worker
- * Única capa HTTP sobre la API Fetch: manifiesto, streams, salud y estáticos.
+ * Única capa HTTP sobre la API Fetch: manifiesto, catálogo, metadatos, streams, salud y estáticos.
  * La lógica del addon (consulta y formato) vive en addon.js; aquí solo se
  * enruta, aplica CORS y administra la caché del edge con la Cache API.
  *
@@ -24,8 +24,10 @@ const CORS_HEADERS = {
 const HSTS = 'Strict-Transport-Security';
 const MANIFEST_CACHE_CONTROL = 'public, max-age=300, s-maxage=300, stale-while-revalidate=3600, stale-if-error=3600';
 const ASSET_CACHE_CONTROL = 'public, max-age=86400, stale-while-revalidate=604800';
-// /stream/:type/:id.json con segmento opcional :extra, como el router del SDK.
+// Rutas con segmento extra opcional, como el router del SDK.
 const STREAM_ROUTE = /^\/stream\/([^/]+)\/([^/]+)(?:\/([^/]+))?\.json$/;
+const CATALOG_ROUTE = /^\/catalog\/([^/]+)\/([^/]+)(?:\/([^/]+))?\.json$/;
+const META_ROUTE = /^\/meta\/([^/]+)\/([^/]+)\.json$/;
 
 // Fuera de Workers no hay ctx.waitUntil: basta con evitar el rechazo no
 // manejado para que el trabajo en segundo plano no rompa el proceso local.
@@ -121,17 +123,62 @@ async function streamResponse(match, url, ctx) {
     } catch (_) { /* segmento extra irrelevante para el handler */ }
   }
   const query = Object.fromEntries(url.searchParams);
+  const args = { type, id, extra: { ...query, ...extra }, config: {} };
   let result;
   try {
-    // El mismo singleton de caché que usa la interfaz del SDK; el keepAlive
-    // por llamada permite registrar la revalidación en ctx.waitUntil.
-    result = await addon.helpers.cachedStreamHandler(
-      { type, id, extra: { ...query, ...extra }, config: {} },
-      keepAliveFor(ctx)
-    );
+    if (type === 'tv') {
+      result = await addon.helpers.tvStreamHandler(args);
+    } else {
+      // El mismo singleton de caché que usa la interfaz del SDK; el keepAlive
+      // por llamada permite registrar la revalidación en ctx.waitUntil.
+      result = await addon.helpers.cachedStreamHandler(args, keepAliveFor(ctx));
+    }
   } catch (err) {
     console.error('[Stream] Excepción no controlada:', err && err.message);
     result = { streams: [] };
+  }
+  return decorate(new Response(JSON.stringify(result), {
+    headers: { 'Content-Type': JSON_TYPE, 'Cache-Control': streamCacheControl(result) }
+  }));
+}
+
+async function catalogResponse(match, url) {
+  let type = '';
+  let id = '';
+  try {
+    type = decodeURIComponent(match[1]);
+    id = decodeURIComponent(match[2]);
+  } catch (_) { /* el handler devolverá un catálogo vacío */ }
+  let pathExtra = {};
+  if (match[3]) pathExtra = Object.fromEntries(new URLSearchParams(match[3]));
+  const query = Object.fromEntries(url.searchParams);
+  let result;
+  try {
+    result = await addon.helpers.tvCatalogHandler({
+      type, id, extra: { ...query, ...pathExtra }, config: {}, origin: url.origin
+    });
+  } catch (err) {
+    console.error('[Catalog] Excepción no controlada:', err && err.message);
+    result = { metas: [] };
+  }
+  return decorate(new Response(JSON.stringify(result), {
+    headers: { 'Content-Type': JSON_TYPE, 'Cache-Control': streamCacheControl(result) }
+  }));
+}
+
+async function metaResponse(match, url) {
+  let type = '';
+  let id = '';
+  try {
+    type = decodeURIComponent(match[1]);
+    id = decodeURIComponent(match[2]);
+  } catch (_) { /* el handler devolverá metadatos vacíos */ }
+  let result;
+  try {
+    result = await addon.helpers.tvMetaHandler({ type, id, config: {}, origin: url.origin });
+  } catch (err) {
+    console.error('[Meta] Excepción no controlada:', err && err.message);
+    result = { meta: {} };
   }
   return decorate(new Response(JSON.stringify(result), {
     headers: { 'Content-Type': JSON_TYPE, 'Cache-Control': streamCacheControl(result) }
@@ -181,14 +228,15 @@ async function staticResponse(request, url, env) {
 /**
  * Caché del edge con la Cache API: solo GET, solo 200 y solo respuestas que
  * anuncian s-maxage explícito; los fallos y /health nunca se almacenan. La
- * clave ignora la cadena de consulta: los parámetros no cambian la respuesta
- * y normalizarla evita fragmentar la caché por variaciones irrelevantes.
+ * clave ignora la cadena de consulta salvo en catálogos, donde `search` u
+ * otros filtros pueden modificar el resultado.
  */
-async function edgeCache(request, url, ctx, generate) {
+async function edgeCache(request, url, ctx, generate, { includeQuery = false } = {}) {
   const store = typeof caches !== 'undefined' && caches ? caches.default : null;
   const cacheableMethod = request.method === 'GET';
   const bypass = /no-store/.test(request.headers.get('cache-control') || '');
-  const key = cacheableMethod ? new Request(`${url.origin}${url.pathname}`) : null;
+  const cacheUrl = `${url.origin}${url.pathname}${includeQuery ? url.search : ''}`;
+  const key = cacheableMethod ? new Request(cacheUrl) : null;
   if (store && key && !bypass) {
     try {
       const hit = await store.match(key);
@@ -233,8 +281,14 @@ async function handleRequest(request, env = {}, ctx = undefined) {
       response = healthResponse();
     } else {
       const streamMatch = STREAM_ROUTE.exec(url.pathname);
+      const catalogMatch = CATALOG_ROUTE.exec(url.pathname);
+      const metaMatch = META_ROUTE.exec(url.pathname);
       if (streamMatch) {
         response = await edgeCache(request, url, ctx, () => streamResponse(streamMatch, url, ctx));
+      } else if (catalogMatch) {
+        response = await edgeCache(request, url, ctx, () => catalogResponse(catalogMatch, url), { includeQuery: true });
+      } else if (metaMatch) {
+        response = await edgeCache(request, url, ctx, () => metaResponse(metaMatch, url));
       } else if (url.pathname === '/' || url.pathname.startsWith('/assets/')) {
         response = await staticResponse(request, url, env);
       } else {

@@ -3,7 +3,8 @@
 
 # Supabase - Obtén estas claves en: https://supabase.com/dashboard/project/_/settings/api
 SUPABASE_URL=https://xxxxxxxx.supabase.co
-# Preferir ANON con RLS de lectura. SERVICE_ROLE solo en servidor, si es necesario.
+# Preferir ANON con RLS SELECT de solo lectura en torrents y tv_channels.
+# SERVICE_ROLE solo en servidor, si es necesario.
 SUPABASE_ANON_KEY=tu_clave_anon
 # SUPABASE_SERVICE_ROLE_KEY=tu_clave_privada
 
