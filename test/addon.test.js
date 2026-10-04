@@ -108,9 +108,11 @@ test('TV catalog, metadata and live streams read public.tv_channels', async () =
   assert.equal(catalog.metas[0].country, 'Nicaragua', 'el país del canal se publica con su nombre en español');
   assert.deepEqual(catalog.metas[0].genres, ['Deportes', 'Nicaragua'], 'los géneros son el tipo de contenido y el país');
   assert.equal(catalog.metas[0].behaviorHints.isLive, true);
+  assert.equal(catalog.cacheMaxAge, 300);
   assert.equal(catalog.metas[1].poster, 'https://img.example/news.png');
   assert.ok(m.calls.some(call => call[0] === 'from' && call[1] === 'tv_channels'));
-  assert.ok(m.calls.some(call => call[0] === 'select' && call[1] === '*'));
+  assert.ok(m.calls.some(call => call[0] === 'select' && call[1] === 'id,name,slug,logo_url,stream_url,stream_type,category,country_code,is_active'),
+    'la lectura del catálogo usa la proyección compacta del esquema compartido');
 
   const filtered = await tvCatalogHandler({
     type: 'tv', id: 'tv_channels', extra: { search: 'aguila', genre: 'deportes' }
@@ -135,10 +137,101 @@ test('TV catalog, metadata and live streams read public.tv_channels', async () =
   assert.equal(playback.streams.length, 1);
   assert.equal(playback.streams[0].url, 'https://video.example/live.m3u8');
   assert.equal(playback.streams[0].behaviorHints.notWebReady, true, 'marca HLS como no compatible con reproducción web directa');
-  assert.equal(playback.cacheMaxAge, 120);
+  assert.equal(playback.cacheMaxAge, 300);
   const dash = await tvStreamHandler({ type: 'tv', id: catalog.metas[1].id }, m.client);
   assert.equal(dash.streams[0].url, 'https://video.example/news.mpd');
   assert.match(dash.streams[0].name, /DASH/);
+});
+
+test('TV catalog only parses stream and poster URLs for the returned page', async () => {
+  const rows = Array.from({ length: 1000 }, (_, index) => ({
+    name: `Canal ${index % 5}`,
+    logo_url: 'https://img.example/channel.png',
+    stream_url: `https://video.example/live-${index}.m3u8`,
+    stream_type: 'hls', category: index % 2 ? 'Noticias' : 'Deportes',
+    country_code: 'NIC', is_active: true
+  }));
+  const m = mock(rows);
+  const OriginalURL = global.URL;
+  let parsedURLs = 0;
+  global.URL = class CountingURL extends OriginalURL {
+    constructor(...args) { parsedURLs++; super(...args); }
+  };
+  try {
+    const result = await addon.helpers.tvCatalogHandler({
+      type: 'tv', id: 'tv_channels', origin: 'https://addon.example'
+    }, m.client);
+    assert.equal(result.metas.length, 100);
+    assert.equal(parsedURLs, 200, 'solo procesa las dos URL de cada canal que realmente entrega');
+  } finally {
+    global.URL = OriginalURL;
+  }
+});
+
+test('TV query uses a compact projection and falls back for a noncanonical schema', async t => {
+  const { configure, tvChannelColumns, fetchTVChannelRows } = addon.helpers;
+  t.after(() => configure(null));
+  configure(null);
+  assert.equal(tvChannelColumns(), 'id,name,slug,logo_url,stream_url,stream_type,category,country_code,is_active');
+  configure({ SUPABASE_TV_CHANNEL_COLUMNS: 'id, name, stream_url, category' });
+  assert.equal(tvChannelColumns(), 'id,name,stream_url,category', 'la proyección opcional se sanea');
+  configure({ SUPABASE_TV_CHANNEL_COLUMNS: '*' });
+  assert.equal(tvChannelColumns(), '*', 'se puede solicitar explícitamente todas las columnas');
+  configure(null);
+
+  const selections = [];
+  let selected = '';
+  const query = {};
+  query.from = () => query;
+  query.select = columns => { selected = columns; selections.push(columns); return query; };
+  query.limit = () => query;
+  query.abortSignal = async () => selected === '*'
+    ? { data: [{ id: '1', name: 'Canal', stream_url: 'https://video.example/live.m3u8' }], error: null }
+    : { data: null, error: { code: 'PGRST204', message: 'Could not find the category column in the schema cache' } };
+  const result = await fetchTVChannelRows(() => query);
+  assert.deepEqual(selections, [
+    'id,name,slug,logo_url,stream_url,stream_type,category,country_code,is_active', '*'
+  ]);
+  assert.equal(result.error, null);
+  assert.equal(result.rows.length, 1);
+
+  configure({ SUPABASE_TV_CHANNEL_COLUMNS: '*' });
+  selections.length = 0;
+  const allColumns = await fetchTVChannelRows(() => query);
+  assert.deepEqual(selections, ['*'], 'el wildcard de entorno llega como SELECT * a Supabase');
+  assert.equal(allColumns.error, null);
+});
+
+test('concurrent cold TV reads share one Supabase request and then use the isolate cache', async t => {
+  const { configure, fetchTVChannelRows } = addon.helpers;
+  const originalFetch = global.fetch;
+  let requests = 0;
+  global.fetch = async input => {
+    requests++;
+    assert.match(String(input), /\/rest\/v1\/tv_channels/);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    return new Response(JSON.stringify([{
+      id: 'channel-1', name: 'Canal Uno', slug: 'canal-uno', logo_url: null,
+      stream_url: 'https://video.example/live.m3u8', stream_type: 'hls',
+      category: 'Noticias', country_code: 'NIC', is_active: true
+    }]), {
+      status: 200,
+      headers: { 'content-type': 'application/json', 'content-range': '0-0/1' }
+    });
+  };
+  configure({ SUPABASE_URL: 'https://demo.supabase.co', SUPABASE_ANON_KEY: 'anon' });
+  t.after(() => {
+    global.fetch = originalFetch;
+    configure(null);
+  });
+
+  const [first, second] = await Promise.all([fetchTVChannelRows(), fetchTVChannelRows()]);
+  assert.equal(requests, 1, 'lecturas frías simultáneas comparten la consulta en vuelo');
+  assert.equal(first.rows.length, 1);
+  assert.equal(second.rows.length, 1);
+  const cached = await fetchTVChannelRows();
+  assert.equal(requests, 1, 'lecturas posteriores usan la caché del isolate');
+  assert.equal(cached.cached, true);
 });
 
 test('TV handlers reject unrelated catalog IDs and unsafe stream schemes', async () => {

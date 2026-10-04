@@ -1,5 +1,22 @@
 # Historial de cambios
 
+## 1.6.4 — 2026-10-04
+
+**Endurecimiento del catálogo de TV frente a los límites de CPU y memoria de Cloudflare Workers.**
+
+- **Consulta estrecha por defecto:** `tv_channels` selecciona los nueve campos del esquema compartido en lugar de `SELECT *`, reduciendo el JSON que Supabase y el Worker deben procesar. `SUPABASE_TV_CHANNEL_COLUMNS` permite elegir campos opcionales o definir literalmente `*` (con mayor coste); si falta una columna seleccionada, se reintenta con `SELECT *` y se recuerda ese modo en el isolate. En esquemas distintos, define una proyección con nombres existentes para conservar la reducción.
+- **Catálogo paginado más barato:** en el catálogo sin filtros se calculan solo nombre, posición e identidad para ordenar; URL y logo se validan al construir la página de hasta 100 canales. Los filtros usan candidatos ligeros y postergan la normalización completa hasta la página seleccionada.
+- **Clasificación sin compilación repetida:** los patrones de alias se precompilan una vez y se reutiliza `Intl.Collator`, reduciendo trabajo por canal. El manifiesto agrega filtros directamente desde categoría/país, sin normalizar enlaces ni logos.
+- **Menos lecturas repetidas:** se conserva la respuesta compacta de filas 30 segundos en memoria por isolate, se sirve como respaldo hasta diez minutos ante fallos, y las peticiones frías simultáneas comparten una lectura de Supabase. El edge cachea éxitos de catálogo/metadata/streams cinco minutos.
+- **Caché HTTP más aprovechable:** el orden de los parámetros de catálogo ya no crea claves duplicadas; `HEAD` reutiliza una entrada `GET` disponible y evita ejecutar otra vez el handler.
+- **Portada renovada y ligera:** jerarquía visual, navegación por secciones, estados accesibles del buscador y arte principal en WebP de unos 28 KB; recursos con versión en URL, sin librerías ni fuentes externas.
+- **Metadatos y streams directos:** el ID de TV se decodifica y se localiza en las filas sin normalizar ni ordenar todos los canales.
+- **Menos trabajo al entregar fuentes a Stremio:** se clasifican candidatos pequeños y solo se construyen los detalles completos (título, badges y trackers) de las 25 fuentes que realmente se envían; se conserva el límite y el ranking.
+- **Pruebas:** cobertura de proyección compacta/fallback, lectura simultánea compartida, reutilización `HEAD` y orden de query canónico; un catálogo simulado de 1000 filas confirma que solo se parsean URLs de los 100 elementos devueltos.
+- **Versión sincronizada:** `package.json`, `package-lock.json`, el manifiesto generado y la página pública quedan en `1.6.4`.
+
+Estas optimizaciones reducen el trabajo del addon; los topes absolutos del plan Cloudflare y fallos externos siguen siendo responsabilidad de la plataforma.
+
 ## 1.6.3 — 2026-10-04
 
 **Fuentes de torrents mejor seleccionadas y catálogo de TV clasificado por tipo de contenido y país.**

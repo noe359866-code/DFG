@@ -236,16 +236,25 @@ async function staticResponse(request, url, env) {
 }
 
 /**
- * Caché del edge con la Cache API: solo GET, solo 200 y solo respuestas que
+ * Caché del edge con la Cache API: GET/HEAD, solo 200 y solo respuestas que
  * anuncian s-maxage explícito; los fallos y /health nunca se almacenan. La
- * clave ignora la cadena de consulta salvo en catálogos, donde `search` u
- * otros filtros pueden modificar el resultado.
+ * clave ignora la cadena de consulta salvo en catálogos (parámetros ordenados),
+ * donde `search` u otros filtros pueden modificar el resultado.
  */
 async function edgeCache(request, url, ctx, generate, { includeQuery = false } = {}) {
   const store = typeof caches !== 'undefined' && caches ? caches.default : null;
-  const cacheableMethod = request.method === 'GET';
+  // HEAD puede aprovechar la entrada GET equivalente; el router elimina el
+  // cuerpo al final de la respuesta. Esto evita consultas frías repetidas.
+  const cacheableMethod = request.method === 'GET' || request.method === 'HEAD';
   const bypass = /no-store/.test(request.headers.get('cache-control') || '');
-  const cacheUrl = `${url.origin}${url.pathname}${includeQuery ? url.search : ''}`;
+  let query = '';
+  if (includeQuery) {
+    const params = new URLSearchParams(url.searchParams);
+    params.sort();
+    const serialized = params.toString();
+    if (serialized) query = `?${serialized}`;
+  }
+  const cacheUrl = `${url.origin}${url.pathname}${query}`;
   const key = cacheableMethod ? new Request(cacheUrl) : null;
   if (store && key && !bypass) {
     try {
