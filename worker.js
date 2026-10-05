@@ -28,6 +28,8 @@ const ASSET_CACHE_CONTROL = 'public, max-age=86400, stale-while-revalidate=60480
 const STREAM_ROUTE = /^\/stream\/([^/]+)\/([^/]+)(?:\/([^/]+))?\.json$/;
 const CATALOG_ROUTE = /^\/catalog\/([^/]+)\/([^/]+)(?:\/([^/]+))?\.json$/;
 const META_ROUTE = /^\/meta\/([^/]+)\/([^/]+)\.json$/;
+// Google Search Console verifies ownership by requesting this static file at the site root.
+const GOOGLE_SITE_VERIFICATION_PATH = '/google2a0fb4fe78f89332.html';
 
 // Fuera de Workers no hay ctx.waitUntil: basta con evitar el rechazo no
 // manejado para que el trabajo en segundo plano no rompa el proceso local.
@@ -308,7 +310,8 @@ async function handleRequest(request, env = {}, ctx = undefined) {
         response = await edgeCache(request, url, ctx, () => catalogResponse(catalogMatch, url), { includeQuery: true });
       } else if (metaMatch) {
         response = await edgeCache(request, url, ctx, () => metaResponse(metaMatch, url));
-      } else if (url.pathname === '/' || url.pathname.startsWith('/assets/')) {
+      } else if (url.pathname === '/' || url.pathname.startsWith('/assets/') ||
+          url.pathname === GOOGLE_SITE_VERIFICATION_PATH) {
         response = await staticResponse(request, url, env);
       } else {
         response = jsonResponse({ error: 'No encontrado' }, 404);
