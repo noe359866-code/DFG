@@ -231,6 +231,10 @@ test('static assets are served through the ASSETS binding with one day of cache'
   assert.equal(image.status, 200);
   assert.equal(image.headers.get('content-type'), 'image/png');
   assert.equal(image.headers.get('cache-control'), 'public, max-age=86400, stale-while-revalidate=604800');
+  const verification = await fetchWorker('/google2a0fb4fe78f89332.html', { env: { ASSETS: assets } });
+  assert.equal(verification.status, 200, 'el archivo de Search Console se sirve en la raíz del sitio');
+  assert.match(verification.headers.get('content-type') || '', /text\/html/);
+  assert.equal(await verification.text(), 'google-site-verification: google2a0fb4fe78f89332.html\n');
   const missing = await fetchWorker('/assets/missing.png', { env: { ASSETS: assets } });
   assert.equal(missing.status, 404);
   assert.deepEqual(await missing.json(), { error: 'No encontrado' });
