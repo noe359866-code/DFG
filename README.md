@@ -112,6 +112,45 @@ Abre la página de tu despliegue y pulsa **Añadir a Stremio**, o copia su enlac
 
 El identificador histórico se conserva para mantener la identidad del complemento existente. El nombre visible cambia a **Nexo Play**; ya no promete contenido exclusivamente en español.
 
+## Solución de problemas: canales de TV sin sonido (VLC / libVLC)
+
+Síntoma: en un canal de TV se ve la imagen pero no hay audio, y solo ocurre cuando reproduce **VLC** (el motor libVLC interno de Stremio o la app VLC como reproductor externo); con ExoPlayer o con el reproductor de Stremio en PC sí suena.
+
+El complemento no procesa el audio: `tvStreamHandler` entrega la URL de `tv_channels.stream_url` tal cual (`hls`, `dash`, `custom`) o como enlace externo (`embed`). Si hay vídeo sin sonido, el corte está en cómo el reproductor interpreta ese enlace. Las tres causas reales:
+
+1. **HLS con el audio en una pista separada** (`#EXT-X-MEDIA:TYPE=AUDIO`, habitual en canales con varias lenguas o audiodescripción). libVLC a veces se queda con la variante solo vídeo o selecciona la última pista disponible, y arranca mudo o en el idioma equivocado.
+2. **Códec de audio no decodificado por la vía elegida**: E-AC-3 (DD+), AC-3, DTS o HE-AAC v2 con *tunneled playback*, passthrough o aceleración por hardware activados en Android TV, Google TV y Fire TV.
+3. **La variante de audio exige cabeceras o token** que no se reenvían al reproductor: el vídeo responde 200 y el audio 403.
+
+### Diagnóstico en dos minutos
+
+- Dentro del reproductor, abre el selector de **pistas de audio**. Si aparecen varias y al elegir la primera (o «Español») vuelve el sonido, es la causa 1. Si no aparece ninguna pista, el audio viaja en una rendition separada que no se une.
+- Copia el enlace del stream y ábrelo en **VLC de escritorio** o en la **app VLC independiente**: si ahí suena, el problema es el libVLC embebido en Stremio, no el canal. En VLC de escritorio, *Herramientas → Información del códec* muestra el códec de audio real (AAC, AC-3, E-AC-3, MP2…).
+- Prueba el mismo canal en **mpv** o **MX Player**: si suenan y VLC no, es un límite de decodificación de VLC en ese dispositivo.
+
+### Arreglos por plataforma
+
+**Stremio en Android TV / Google TV / Fire TV**
+
+1. *Ajustes → Reproducción → Reproductor predeterminado*: prueba **ExoPlayer** en lugar de libVLC (o, al revés, si el fallo es con ExoPlayer). El selector también existe en el engranaje del propio reproductor.
+2. Desactiva **Tunneled playback** y **Aceleración por hardware** en *Ajustes → Reproducción*; si el ajuste de decodificación permite «solo vídeo», úsalo.
+3. Instala **VLC** (o MX Player) como app independiente y elige *Reproductor externo*: suele arrastrar menos fallos de pista que el motor integrado.
+4. En la TV o el box, pon la salida de audio en **PCM / Estéreo** en lugar de Bitstream, Passthrough o Dolby: muchos equipos sin licencia Dolby devuelven silencio con AC-3/E-AC-3.
+5. Con el reproductor abierto, fuerza la pista: menú de audio → **Pista 1** (o Español). En VLC de escritorio la tecla `b` cambia de pista de audio y `m` silencia; revisa que no quede en «Desactivar».
+6. Actualiza VLC: las builds antiguas fallan con HE-AAC v2 y E-AC-3.
+
+**Stremio en Windows / Linux / macOS con VLC externo**
+
+- *VLC → Preferencias → Audio*: marca «Permitir la selección de la pista de audio» y elige «Todas» en la opción de pista preferida; en «Dispositivo de salida» prueba entre el dispositivo concreto, WASAPI/DirectX (Windows) o ALSA/PulseAudio (Linux).
+- *Preferencias → Entrada / Códecs*: códec de audio en «Automático» y desactiva «Acceso al hardware» si el silencio aparece solo en algunos canales.
+- Alternativa directa: clic derecho sobre la fuente en Stremio → **Copiar enlace del stream** → en VLC `Ctrl + V` (*Medio → Abrir ubicación de red*). Si por esa vía suena, el problema es el paso del enlace al reproductor externo, no el canal.
+
+### Cuando el fallo es del dato, no del reproductor
+
+- Si el mismo canal tampoco suena en VLC de escritorio ni en mpv, la fila de `public.tv_channels` apunta a un **playlist maestro cuyo audio está en una rendition protegida o caída**. Comprueba el `.m3u8` con `curl -s <stream_url> | head -40`: si hay líneas `#EXT-X-MEDIA:TYPE=AUDIO ... URI="..."`, prueba a abrir esa URI directamente; si responde 403 o 404, el enlace del canal necesita renovación (o cabeceras).
+- Las URLs `rtmp://` se aceptan al normalizar, pero **ni Stremio ni VLC reproducen RTMP hoy**: esos canales no arrancan o lo hacen sin audio. Conviene migrarlos a HLS o marcarlos `is_active=false`.
+- Si tus canales requieren `User-Agent` o `Referer`, el protocolo de Stremio lo cubre con `behaviorHints.proxyHeaders` (que obliga a incluir también `notWebReady: true`); el complemento aún no lo emite porque la tabla no guarda cabeceras por canal.
+
 ## Soporte
 
 ¿Problemas para instalar, ideas o torrents caídos? Únete al canal de soporte en Discord: <https://discord.gg/qEcdvvcA4>
